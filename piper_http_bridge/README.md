@@ -38,36 +38,56 @@
 
 ---
 
-## 一、在香橙派3B 上部署
+## 一、克隆即跑（香橙派3B，一条命令）
 
-前提：已经按官方文档装好 `piper_ros`（含 `piper` / `piper_msgs` 包），CAN 已能在 `can0` 上激活。
+前提：香橙派3B 已装好 **ROS Noetic**（无头即可）、能 `git clone`、USB-CAN 已插上。
 
 ```bash
-# 1. 把本包放进你的 catkin 工作空间 src 下（假设工作空间是 ~/piper_ros）
-cd ~/piper_ros/src
-# 复制 piper_http_bridge 目录到这里，然后：
-cd ~/piper_ros
-catkin_make
-source devel/setup.bash
-
-# 2. 激活 CAN（1 Mbps）
-bash can_activate.sh can0 1000000
-
-# 3. 一键启动（控制节点 + HTTP/TCP 桥）
-roslaunch piper_http_bridge piper_http_bridge.launch \
-    can_port:=can0 auto_enable:=true http_port:=8080 tcp_port:=9090
+git clone <本仓库地址> robot
+cd robot
+./piper_http_bridge/install.sh
 ```
 
-> 生产上建议加一个 `--token`（launch 参数 `token:=你的密钥`）做 Bearer 鉴权，
-> 否则同网段任何人都能控制机械臂。
+`install.sh` 是**幂等**的，会自动依次完成：
+1. 装依赖（`can-utils`、`ethtool`、`piper_sdk`、`python-can`、catkin 工具）
+2. 克隆官方 `piper_ros`(noetic 分支） 并编译到工作空间（默认 `~/piper_ros_ws`）
+3. 把本桥包拷进工作空间并 `catkin_make`
+4. 激活 CAN 接口（默认 `can0` @ 1 Mbps）
+5. 安装并启动 systemd 服务（开机自启，含 CAN 拉起）
 
-### 开机自启（无头）
+跑完后控制端口就已上线：
+```bash
+curl http://<香橙派IP>:8080/state
+curl -X POST http://<香橙派IP>:8080/cmd -d '{"action":"enable"}'
+```
+
+常用自定义（全部可选）：
+```bash
+./piper_http_bridge/install.sh \
+    --workspace ~/my_ws \   # 自定义工作空间
+    --can can0 \            # CAN 接口名（默认 can0）
+    --token 我的密钥 \       # 开启 Bearer 鉴权（强烈建议）
+    --http-port 8080 --tcp-port 9090
+```
+
+> 生产上**务必加 `--token`**，否则同网段任何人都能控制机械臂。
+
+### 日常运维
 
 ```bash
-sudo cp scripts/piper-bridge.service /etc/systemd/system/
-# 编辑该文件里的 用户名 / 工作空间路径 / can_activate.sh 路径
-sudo systemctl daemon-reload
-sudo systemctl enable --now piper-bridge.service
+./piper_http_bridge/update.sh       # 改完代码后：重新同步 + 编译 + 重启服务
+./piper_http_bridge/uninstall.sh    # 卸载：停服务 + 删包
+sudo systemctl status piper-bridge  # 查看服务状态
+journalctl -u piper-bridge -f       # 实时日志
+```
+
+### 手动启动（不装 systemd 时）
+
+```bash
+./piper_http_bridge/install.sh --no-service   # 只编译不装服务
+source ~/piper_ros_ws/devel/setup.bash
+bash ~/piper_ros_ws/can_activate.sh can0 1000000
+roslaunch piper_http_bridge piper_http_bridge.launch can_port:=can0 auto_enable:=true
 ```
 
 ---
