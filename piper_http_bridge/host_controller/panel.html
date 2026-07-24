@@ -213,36 +213,49 @@ function flashKey(k){
   if(btn) flash(btn);
 }
 
-// ---------- 关节点动（按住连续，平滑流式；动态步长） ----------
-// 动态步长:点按/刚按下 -> 小步长(微操);按住 -> 步长按 x3 提速(快速运动)。
+// ---------- 关节点动（点动=小步微操，按住=连续+提速） ----------
+// 判定很直白:
+//   * 点动 = 收到一个停止(松开/离开)前的单击 -> 只动一小步。
+//   * 按住 = 指针没抬起 -> 定时器持续发;从第 2 拍开始步长按 x3 提速。
+// 键盘(按住会自重复)用"延时未停即续发"来区分单点与按住;触摸/鼠标直接看 start/stop。
 const JREP_MS=25;      // 按住时的重复率 ~40Hz -> 平滑
-const TAP_MS=200;      // 按住 <200ms 视为点动(小步)
-const BOOST=3;         // 按住后步长倍率
-const _jj={i:null, d:0, timer:null, count:0, base:0, t0:0, lastId:0, btn:null};
+const KB_HOLD_MS=180;  // 键盘:按下超过这个还没松开 => 视为按住
+const BOOST=3;         // 按住后的步长倍率
+const _jj={i:null, d:0, base:0, count:0, timer:null, stopped:true, kbHold:false};
 
 function _setBoost(on){ const b=$("#boost"+_jj.i); if(b) b.classList.toggle("on",!!on); }
-function _stopIf(id){ if(id===_jj.lastId) stopJoint(); }
 
 function _fire(){ doCmd({action:"joint_jog", index:_jj.i, delta:_jj.d*_jj.base}); }
 function _tick(){
+  if(_jj.stopped) return;
   _jj.count++;
-  const holding=(Date.now()-_jj.t0)>=TAP_MS || _jj.count>=2;
-  if(holding){ _jj.base=jointStep(_jj.i)*BOOST; _setBoost(true); }
+  if(_jj.count>=2){ _jj.base=jointStep(_jj.i)*BOOST; _setBoost(true); }  // 按住 -> 提速
   _fire();
 }
 
-function startJoint(i,d,btn){
-  if(_jj.i===i && _jj.d===d) return;                 // 已在点动该轴
-  if(btn){ _jj.btn=btn; }
-  _jj.i=i; _jj.d=d; _jj.count=0; _jj.base=jointStep(i); _jj.t0=Date.now();
+// 触摸/鼠标:start 明确的按住;end 明确的停止。立即动一小步,持续按住则续发+提速。
+function pressJoint(i,d){
+  _jj.i=i; _jj.d=d; _jj.base=jointStep(i); _jj.count=0;
+  _jj.stopped=false; _jj.kbHold=false;
   _setBoost(false);
-  _fire();                                            // 立即一拍小步
+  _fire();                                            // 立即一小步(点动也只有这一步)
   if(_jj.timer==null) _jj.timer=setInterval(_tick,JREP_MS);
-  _jj.lastId++;
-  setTimeout(()=>_stopIf(_jj.lastId), TAP_MS);        // 点动:200ms 后停
+}
+function releaseJoint(){ stopJoint(); }
+
+// 键盘:立即一小步;按住会自重复,所以"延时未停"才开始连续+提速。
+function kbJoint(i,d){
+  if(!_jj.stopped && _jj.i===i && _jj.d===d && _jj.kbHold) return;  // 已在按住连发
+  _jj.i=i; _jj.d=d; _jj.base=jointStep(i); _jj.count=0;
+  _jj.stopped=false; _jj.kbHold=true;
+  _setBoost(false);
+  _fire();
+  if(_jj.timer==null) _jj.timer=setInterval(_tick,JREP_MS);
+  const tok=(_jj.kbTok=( _jj.kbTok||0)+1);
+  setTimeout(()=>{ if(_jj.kbTok===tok) _jj.kbHold=false; },KB_HOLD_MS);
 }
 function stopJoint(){
-  _jj.i=null; _jj.count=0;
+  _jj.stopped=true; _jj.count=0;
   if(_jj.timer!=null){ clearInterval(_jj.timer); _jj.timer=null; }
 }
 
@@ -254,7 +267,7 @@ const KEYJ={"1":{i:0,d:-1},"2":{i:0,d:+1},
             "9":{i:4,d:-1},"0":{i:4,d:+1},
             "-":{i:5,d:-1},"=":{i:5,d:+1}};
 
-// 键盘:按住连续,松开停止;不含 Space/Enter(避免与 Tab/按钮冲突)
+// 键盘:单点=一小步,按住(自重复)=连续+提速;松开停。不含 Space/Enter。
 const _keyHeld={};
 document.addEventListener("keydown",e=>{
   const k=e.key.toLowerCase();
@@ -263,13 +276,13 @@ document.addEventListener("keydown",e=>{
   if(k==="g"){ gripTo(gripActual-gripStep()); flashKey("g"); return; }
   if(k==="h"){ gripTo(gripActual+gripStep()); flashKey("h"); return; }
   const spec=KEYJ[k];
-  if(spec){ flashKey(k); _keyHeld[k]=true; startJoint(spec.i,spec.d); }
+  if(spec){ flashKey(k); _keyHeld[k]=true; kbJoint(spec.i,spec.d); }
 });
 document.addEventListener("keyup",e=>{
   const k=e.key.toLowerCase();
   if(KEYJ[k]){ delete _keyHeld[k];
     const still=Object.keys(_keyHeld).filter(x=>KEYJ[x]);
-    if(still.length){ const s=KEYJ[still[still.length-1]]; startJoint(s.i,s.d); }
+    if(still.length){ const s=KEYJ[still[still.length-1]]; kbJoint(s.i,s.d); }
     else stopJoint();
   }
 });
@@ -319,8 +332,8 @@ const JOINT_KEY=[["1","2"],["3","4"],["5","6"],["7","8"],["9","0"],["-","="]];
     box.appendChild(row);
     row.querySelectorAll("button").forEach(b=>{
       const d=Number(b.dataset.joint.split(":")[1]);
-      const start=e=>{e.preventDefault(); flash(b); startJoint(i,d,b);};
-      const stop=()=>stopJoint();
+      const start=e=>{e.preventDefault(); flash(b); pressJoint(i,d);};
+      const stop=()=>releaseJoint();
       b.addEventListener("mousedown",start); b.addEventListener("touchstart",start,{passive:false});
       b.addEventListener("mouseup",stop); b.addEventListener("mouseleave",stop);
       b.addEventListener("touchend",stop);
