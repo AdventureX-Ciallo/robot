@@ -228,6 +228,60 @@ def test_frontends(mod):
         tcpd.shutdown(); tcpd.server_close()
 
 
+def test_jog(mod):
+    print("[relative jog -> heading-aware, EndPoseCtrl]")
+    import math
+    b = mod.PiperSDKBackend(can_port="can0")
+    fake = b.piper
+    fake.calls = []                       # ignore startup noise
+
+    # --- forward jog: feedback pose (200,0,150 mm; yaw 0) advances +X ---
+    r = b.cmd_jog(fwd=0.01)
+    check("jog ok", r.get("ok") is True)
+    args = last_call(fake, "EndPoseCtrl")
+    check("jog issues EndPoseCtrl", args is not None and len(args) == 6)
+    check("fwd +10mm -> X 210", args[0] == 210)
+    check("y unchanged 0", args[1] == 0)
+    check("z unchanged 150", args[2] == 150)
+    mc = last_call(fake, "MotionCtrl_2")
+    check("jog uses MOVE P", mc is not None and mc[1] == 0x00)
+
+    # --- heading-relative: yaw 90 deg turns 'forward' into +Y ---
+    b._current_pose = lambda: ((0.2, 0.0, 0.15), (0.0, 90.0, 90.0))
+    r = b.cmd_jog(fwd=0.01)
+    args = last_call(fake, "EndPoseCtrl")
+    check("yaw90 fwd -> +Y", args[1] == 10 and args[0] == 200)
+
+    # --- up is world +Z regardless of yaw ---
+    b._current_pose = lambda: ((0.2, 0.0, 0.15), (0.0, 90.0, 0.0))
+    b.cmd_jog(up=0.005)
+    args = last_call(fake, "EndPoseCtrl")
+    check("up +5mm -> Z 155", args[2] == 155)
+
+    # --- roll about the tool optical axis changes orientation ---
+    b._current_pose = lambda: ((0.2, 0.0, 0.15), (0.0, 90.0, 0.0))
+    b.cmd_jog(roll=2.0)
+    args = last_call(fake, "EndPoseCtrl")
+    check("roll jog changes RX", args[3] != 0)
+
+    # --- rotation round-trip + gimbal-lock continuity ---
+    R = b._rotxyz(0.0, 90.0, 0.0)
+    rr, pp, yy = b._mat_to_euler_near(R, 0.0, 0.0)
+    check("pitch90 euler stays continuous", abs(pp - 90.0) < 1e-6
+          and abs(yy) < 1e-6 and abs(rr) < 1e-6)
+
+    # --- repeated jogs do NOT re-send the mode switch (smooth streaming) ---
+    b._current_pose = lambda: ((0.2, 0.0, 0.15), (0.0, 90.0, 0.0))
+    b._move_mode = b.MOVE_P
+    fake.calls = []
+    b.cmd_jog(fwd=0.004)
+    b.cmd_jog(fwd=0.004)
+    mc_calls = [c for c in fake.calls if c[0] in ("MotionCtrl_2", "ModeCtrl")]
+    check("no redundant mode switch while streaming", len(mc_calls) == 0)
+    check("each jog still commands", sum(1 for c in fake.calls
+                                         if c[0] == "EndPoseCtrl") == 2)
+
+
 def test_watchdog(mod):
     print("[watchdog / CAN recovery]")
     # --- _can_bus_off parses `ip -details link show` output ---
@@ -282,6 +336,7 @@ def main():
     mod = load_server()
     test_backend_units(mod)
     test_frontends(mod)
+    test_jog(mod)
     test_watchdog(mod)
     print("\n=================================")
     print("passed: %d   failed: %d" % (len(PASSED), len(FAILED)))

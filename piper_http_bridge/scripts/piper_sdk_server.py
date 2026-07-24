@@ -17,6 +17,7 @@ Client units: joints=deg, x/y/z=mm, roll/pitch/yaw=deg, gripper=mm.
 import argparse
 import json
 import logging
+import math
 import subprocess
 import sys
 import threading
@@ -168,6 +169,7 @@ class PiperSDKBackend(object):
         self.can_port = can_port
         self._default_speed = sc.clamp_speed(default_speed)
         self._enabled = False
+        self._move_mode = None      # last move mode we commanded (avoid re-sends)
         self._connect()
         if auto_enable:
             self.enable_and_wait()
@@ -205,12 +207,21 @@ class PiperSDKBackend(object):
             self.piper.ModeCtrl(0x01, 0x01, speed, 0x00)
 
     def _set_move_mode(self, move_mode, speed=None):
-        """Switch ctrl to CAN mode + given move_mode (MOVE_J / MOVE_P)."""
-        spd = sc.clamp_speed(speed if speed is not None else self._default_speed)
+        """Switch ctrl to CAN mode + given move_mode (MOVE_J / MOVE_P).
+
+        Skips the MotionCtrl_2 frame when the mode is unchanged and no new
+        speed is requested -- re-sending it on every jog command causes a
+        visible stutter while streaming.
+        """
+        spd = None if speed is None else sc.clamp_speed(speed)
+        if spd is None and self._move_mode == move_mode:
+            return
+        eff = spd if spd is not None else self._default_speed
         try:
-            self.piper.MotionCtrl_2(0x01, move_mode, spd, 0x00)
+            self.piper.MotionCtrl_2(0x01, move_mode, eff, 0x00)
         except AttributeError:
-            self.piper.ModeCtrl(0x01, move_mode, spd, 0x00)
+            self.piper.ModeCtrl(0x01, move_mode, eff, 0x00)
+        self._move_mode = move_mode
 
     def get_move_mode(self):
         try:
@@ -345,6 +356,99 @@ class PiperSDKBackend(object):
             if gripper_mm is not None:
                 self.cmd_gripper(gripper_mm)
         return {"ok": True, "pose_mm_deg": [x, y, z, roll, pitch, yaw]}
+
+    # ---- relative Cartesian jog (heading-aware, firmware IK via EndPoseCtrl) --
+    def cmd_jog(self, fwd=0.0, right=0.0, up=0.0, roll=0.0, pitch=0.0, yaw=0.0):
+        """Jog the tool tip RELATIVE to its own heading, smoothly.
+
+        fwd/right/up : metres -- forward/left/right follow the tool's yaw
+                       (horizontal projection), up is world +Z.
+        roll/pitch/yaw: degrees -- roll rotates about the tool's own forward
+                       (optical) axis, pitch about its own right axis, yaw about
+                       world Z.
+
+        The new absolute target pose is computed here (small increments) and
+        sent via EndPoseCtrl, so the arm's own firmware does the IK. Small,
+        frequent steps + no redundant mode switches keep motion smooth.
+        """
+        with self._lock:
+            pos, rpy = self._current_pose()          # m, deg (firmware feedback)
+            x, y, z = pos
+            r, p, yw = rpy
+            yaw_rad = math.radians(yw)
+
+            # translation, heading-relative (metres)
+            dx = fwd * math.cos(yaw_rad) - right * math.sin(yaw_rad)
+            dy = fwd * math.sin(yaw_rad) + right * math.cos(yaw_rad)
+            dz = up
+            nx, ny, nz = x + dx, y + dy, z + dz
+
+            # orientation, via rotation matrices:
+            #   R_new = Rz(yaw) * R_cur * Ry(pitch) * Rx(roll)
+            # (yaw about world Z premultiplies; pitch/roll about the tool's own
+            # axes postmultiply). Then convert back to ZYX euler, keeping the
+            # solution closest to the current angles to avoid gimbal-lock jumps.
+            R = self._rotxyz(r, p, yw)
+            if yaw:
+                R = self._matmul(self._rotxyz(0.0, 0.0, yaw), R)
+            if pitch:
+                R = self._matmul(R, self._rotxyz(0.0, pitch, 0.0))
+            if roll:
+                R = self._matmul(R, self._rotxyz(roll, 0.0, 0.0))
+            nr, np_, nyw = self._mat_to_euler_near(R, r, yw)
+
+            self._set_move_mode(self.MOVE_P)         # EndPoseCtrl needs MOVE P
+            self.piper.EndPoseCtrl(
+                int(round(nx * 1000.0)), int(round(ny * 1000.0)),
+                int(round(nz * 1000.0)), int(round(nr * 1000.0)),
+                int(round(np_ * 1000.0)), int(round(nyw * 1000.0)))
+        return {"ok": True,
+                "pose": {"x": round(nx, 4), "y": round(ny, 4), "z": round(nz, 4),
+                         "roll": round(nr, 2), "pitch": round(np_, 2),
+                         "yaw": round(nyw, 2)}}
+
+    def _current_pose(self):
+        """Current end pose from firmware feedback -> ((x,y,z) m, (r,p,yaw) deg)."""
+        ep = self.piper.GetArmEndPoseMsgs().end_pose
+        return ((ep.X_axis / 1e6, ep.Y_axis / 1e6, ep.Z_axis / 1e6),
+                (ep.RX_axis / 1000.0, ep.RY_axis / 1000.0, ep.RZ_axis / 1000.0))
+
+    # ---- rotation helpers ------------------------------------------------
+    @staticmethod
+    def _rotxyz(roll, pitch, yaw):                    # deg -> Rz(yaw)*Ry(pitch)*Rx(roll)
+        cr, sr = math.cos(math.radians(roll)), math.sin(math.radians(roll))
+        cp, sp = math.cos(math.radians(pitch)), math.sin(math.radians(pitch))
+        cy, sy = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
+        return [
+            [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+            [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+            [-sp, cp * sr, cp * cr],
+        ]
+
+    @staticmethod
+    def _matmul(A, B):
+        return [[sum(A[i][k] * B[k][j] for k in range(3)) for j in range(3)]
+                for i in range(3)]
+
+    @staticmethod
+    def _mat_to_euler_near(R, ref_roll, ref_yaw):
+        """ZYX euler (deg) of R, choosing the branch closest to the reference
+        roll/yaw so gimbal-lock cases (|pitch|~90) stay continuous."""
+        sp = max(-1.0, min(1.0, -R[2][0]))
+        pitch = math.asin(sp)
+        cp = math.cos(pitch)
+        if abs(cp) > 1e-6:                            # generic case
+            roll = math.atan2(R[2][1], R[2][2])
+            yaw = math.atan2(R[1][0], R[0][0])
+        else:                                         # gimbal lock: keep ref yaw
+            yaw = math.radians(ref_yaw)
+            roll = math.atan2(-R[0][1], R[1][1])
+        return (math.degrees(roll), math.degrees(pitch), math.degrees(yaw))
+
+    def _read_joints_deg(self):
+        js = self.piper.GetArmJointMsgs().joint_state
+        return [v / 1000.0 for v in (js.joint_1, js.joint_2, js.joint_3,
+                                     js.joint_4, js.joint_5, js.joint_6)]
 
     def cmd_gripper(self, position_mm, effort=1000):
         # mm -> 0.001 mm ; effort 0..5000 (0.001 N/m)

@@ -101,6 +101,13 @@ def dispatch(backend, payload):
         if not hasattr(backend, "cmd_set_mode"):
             return {"ok": False, "error": "backend does not support set_mode"}
         return backend.cmd_set_mode(payload.get("mode", "pose"))
+    if action == "jog":
+        if not hasattr(backend, "cmd_jog"):
+            return {"ok": False, "error": "backend does not support jog"}
+        return backend.cmd_jog(
+            payload.get("fwd", 0.0), payload.get("right", 0.0),
+            payload.get("up", 0.0), payload.get("roll", 0.0),
+            payload.get("pitch", 0.0), payload.get("yaw", 0.0))
     raise ValueError("unknown action: %r" % action)
 
 

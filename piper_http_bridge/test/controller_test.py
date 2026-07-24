@@ -69,6 +69,10 @@ class FakeClient:
         self._state["joints_deg"] = list(joints)
         return {"ok": True}
 
+    def jog(self, fwd=0.0, right=0.0, up=0.0, roll=0.0, pitch=0.0, yaw=0.0):
+        self._rec("jog", fwd, right, up, roll, pitch, yaw)
+        return {"ok": True}
+
 
 def load_controller():
     fake = types.ModuleType("piper_client")
@@ -90,27 +94,36 @@ def last(client, name):
 
 
 def test_jog_and_clamp(mod):
-    print("[cartesian jog + clamp]")
+    print("[cartesian jog -> relative stream, clamped]")
     c = mod.Controller("http://127.0.0.1:8080")
     cl = c.client
-    # pose starts at x=200mm y=0 z=150mm roll0 pitch90 yaw0
-    c.jog(dx=0.05, dz=-0.05, droll=10.0)   # +50mm x, -50mm z, +10deg roll
-    args = last(cl, "pose_ctrl")
-    check("jog x 200+50=250mm", abs(args[0] - 250.0) < 1e-6)
-    check("jog z 150-50=100mm", abs(args[2] - 100.0) < 1e-6)
-    check("jog roll 0+10=10", abs(args[3] - 10.0) < 1e-6)
-    check("jog pitch unchanged 90", abs(args[4] - 90.0) < 1e-6)
+    # a normal in-range step passes straight through to the endpoint jog
+    c.jog(fwd=0.005, right=-0.003, up=0.001, roll=1.0, yaw=-0.5)
+    args = last(cl, "jog")
+    check("jog fwd passthrough", abs(args[0] - 0.005) < 1e-9)
+    check("jog right passthrough", abs(args[1] + 0.003) < 1e-9)
+    check("jog up passthrough", abs(args[2] - 0.001) < 1e-9)
+    check("jog roll passthrough", abs(args[3] - 1.0) < 1e-9)
+    check("jog yaw passthrough", abs(args[5] + 0.5) < 1e-9)
 
-    # clamp: push x far beyond the 0.60 m limit
-    for _ in range(50):
-        c.jog(dx=0.1)
-    args = last(cl, "pose_ctrl")
-    check("x clamped at 600mm", abs(args[0] - 600.0) < 1e-6)
-    # clamp: push z below the 0.0 limit
-    for _ in range(50):
-        c.jog(dz=-0.1)
-    args = last(cl, "pose_ctrl")
-    check("z clamped at 0mm", abs(args[2] - 0.0) < 1e-6)
+    # oversized steps are clamped to the per-tick max (smooth velocity cap)
+    c.jog(fwd=0.5, up=-0.9, roll=45.0, pitch=-45.0, yaw=45.0)
+    args = last(cl, "jog")
+    check("fwd clamped to 0.02", abs(args[0] - 0.02) < 1e-9)
+    check("up clamped to -0.02", abs(args[2] + 0.02) < 1e-9)
+    check("roll clamped to 4.0", abs(args[3] - 4.0) < 1e-9)
+    check("pitch clamped to -4.0", abs(args[4] + 4.0) < 1e-9)
+    check("yaw clamped to 4.0", abs(args[5] - 4.0) < 1e-9)
+
+    # no-IK / endpoint failure propagates so the panel can show it
+    def boom(**kw):
+        raise mod.pc.PiperError("IK failed")
+    cl.jog = boom
+    try:
+        c.jog(fwd=0.005)
+        check("jog failure raises", False)
+    except Exception:
+        check("jog failure raises", True)
 
 
 def test_joint_jog(mod):
@@ -170,8 +183,8 @@ def test_http_panel(mod):
             st = json.loads(r.read().decode())
         check("GET /api/state ok", st["ok"] and st["state"]["gripper_mm"] == 40.0)
 
-        # jog via HTTP
-        code, r = _post(port, {"action": "jog", "dx": 0.02})
+        # jog via HTTP (relative, streamed)
+        code, r = _post(port, {"action": "jog", "fwd": 0.005, "roll": 1.0})
         check("POST jog ok", code == 200 and r["ok"])
         code, r = _post(port, {"action": "joint_jog", "index": 0, "delta": 3})
         check("POST joint_jog ok", code == 200 and r["ok"])
