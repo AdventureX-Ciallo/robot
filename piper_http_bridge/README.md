@@ -1,28 +1,30 @@
 # piper_http_bridge
 
-为 **AgileX Piper 6 轴机械臂** 暴露一个 **HTTP / TCP 控制端口** 的 ROS 包。
-面向 **香橙派3B（Orange Pi 3B，ARM64，无头 / headless）** 部署。
+为 **AgileX Piper 6 轴机械臂** 暴露一个 **HTTP / TCP 控制端口**。面向 **香橙派3B（Orange Pi 3B，ARM64，无头 / headless）** 部署。
 
-它**不直接操作 CAN**，而是桥接官方 `piper_ros` 控制节点
-（`piper_ctrl_single_node.py`）已经发布/订阅/提供的 topic 与 service，
-在外面套一层任何语言都能调用的 **HTTP/JSON** 与 **TCP/JSON** 接口。
+提供**两种后端**，对外暴露的 HTTP/JSON 与 TCP/JSON 接口完全一致：
+
+| 后端 | 是否依赖 ROS | 接口完整度 | 适用 |
+|------|------------|-----------|------|
+| **`sdk`（默认/推荐）** | ❌ 不需要 | ✅ 全（stop/reset/go_zero/gripper 都有） | 香橙派3B，最省内存，最快 |
+| `ros` | ✅ 桥接官方 noetic 节点 | ✅ 全 | 还需要 MoveIt/RViz/ROS 生态时 |
+
+SDK 直连架构（默认）：
 
 ```
 客户端(curl/python/任何语言)
         │  HTTP :8080  /  TCP :9090   (JSON)
         ▼
-┌───────────────────────┐
-│ piper_http_bridge_node │   ← 本包（单位换算 + 限位校验 + 鉴权）
-└─────────┬─────────────┘
-          │ ROS topic / service
+┌──────────────────────────┐
+│ piper_sdk_server.py       │  ← 本包(限位校验 + 单位换算 + 鉴权)
+│  + server_common.py       │
+└─────────┬────────────────┘
+          │ piper_sdk (python-can, SocketCAN)
           ▼
-┌────────────────────────────┐
-│ piper_ctrl_single_node (官方) │  ← 走 SocketCAN
-└─────────┬──────────────────┘
-          │ CAN 1Mbps (can0)
-          ▼
-       Piper 机械臂
+       CAN 1Mbps (can0)  →  Piper 机械臂
 ```
+
+ROS 桥架构（可选 `--backend ros`）：`客户端 → piper_http_bridge_node.py → ROS topic/service → 官方 piper_ctrl_single_node → CAN`。
 
 ## 单位约定（对客户端）
 
@@ -40,33 +42,33 @@
 
 ## 一、克隆即跑（香橙派3B，一条命令）
 
-前提：香橙派3B 已装好 **ROS Noetic**（无头即可）、能 `git clone`、USB-CAN 已插上。
+前提：香橙派3B 有 `python3` + `pip`、能 `git clone`、USB-CAN 已插上。**默认 SDK 直连，无需 ROS。**
 
 ```bash
 git clone <本仓库地址> robot
-cd robot
-./piper_http_bridge/install.sh
+./robot/piper_http_bridge/install.sh --token 你的密钥
 ```
 
 `install.sh` 是**幂等**的，会自动依次完成：
-1. 装依赖（`can-utils`、`ethtool`、`piper_sdk`、`python-can`、catkin 工具）
-2. 克隆官方 `piper_ros`(noetic 分支） 并编译到工作空间（默认 `~/piper_ros_ws`）
-3. 把本桥包拷进工作空间并 `catkin_make`
-4. 激活 CAN 接口（默认 `can0` @ 1 Mbps）
-5. 安装并启动 systemd 服务（开机自启，含 CAN 拉起）
+1. 装依赖（`can-utils`、`ethtool`、`piper_sdk`、`python-can`）
+2. SDK 后端无需编译；ROS 后端才会克隆编译官方 `piper_ros`
+3. 激活 CAN 接口（默认 `can0` @ 1 Mbps）
+4. 安装并启动 systemd 服务（开机自启，含 CAN 拉起）
 
-跑完后控制端口就已上线：
+跑完控制端口即上线：
 ```bash
 curl http://<香橙派IP>:8080/state
-curl -X POST http://<香橙派IP>:8080/cmd -d '{"action":"enable"}'
+curl -X POST http://<香橙派IP>:8080/cmd -H "Authorization: Bearer 你的密钥" -d '{"action":"enable"}'
 ```
 
-常用自定义（全部可选）：
+常用选项：
 ```bash
-./piper_http_bridge/install.sh \
-    --workspace ~/my_ws \   # 自定义工作空间
-    --can can0 \            # CAN 接口名（默认 can0）
-    --token 我的密钥 \       # 开启 Bearer 鉴权（强烈建议）
+./robot/piper_http_bridge/install.sh \
+    --backend sdk \            # 默认 sdk；改 ros 走 ROS 桥
+    --token 你的密钥 \          # Bearer 鉴权（强烈建议）
+    --can can0 \               # CAN 接口名（默认 can0）
+    --speed 30 \               # 默认速度 %（首次建议调低）
+    --auto-enable \            # 启动即使能机械臂
     --http-port 8080 --tcp-port 9090
 ```
 
@@ -75,18 +77,25 @@ curl -X POST http://<香橙派IP>:8080/cmd -d '{"action":"enable"}'
 ### 日常运维
 
 ```bash
-./piper_http_bridge/update.sh       # 改完代码后：重新同步 + 编译 + 重启服务
-./piper_http_bridge/uninstall.sh    # 卸载：停服务 + 删包
-sudo systemctl status piper-bridge  # 查看服务状态
-journalctl -u piper-bridge -f       # 实时日志
+./robot/piper_http_bridge/update.sh       # 改完代码后：同步 + (ros则重编译) + 重启服务
+./robot/piper_http_bridge/uninstall.sh    # 卸载：停服务 + 删包
+sudo systemctl status piper-bridge        # 服务状态
+journalctl -u piper-bridge -f             # 实时日志
 ```
 
 ### 手动启动（不装 systemd 时）
 
+SDK 后端：
 ```bash
-./piper_http_bridge/install.sh --no-service   # 只编译不装服务
+./robot/piper_http_bridge/install.sh --no-service --token 你的密钥
+sudo ip link set can0 up type can bitrate 1000000   # 若 CAN 未激活
+python3 ./robot/piper_http_bridge/scripts/piper_sdk_server.py --can can0 --token 你的密钥 --speed 30
+```
+
+ROS 后端：
+```bash
+./robot/piper_http_bridge/install.sh --backend ros --no-service
 source ~/piper_ros_ws/devel/setup.bash
-bash ~/piper_ros_ws/can_activate.sh can0 1000000
 roslaunch piper_http_bridge piper_http_bridge.launch can_port:=can0 auto_enable:=true
 ```
 
@@ -175,14 +184,15 @@ print(cmd(action="state"))
 
 ---
 
-## 四、本地干跑测试（无需真机/无需ROS）
+## 四、本地干跑测试（无需真机/无需ROS/无需CAN）
 
-`test/dry_run_test.py` 用 stub 顶替 rospy 与消息类型，在本机（甚至 Windows）
-直接验证 HTTP/TCP 服务、限位校验与单位换算逻辑：
+两套测试都用桩顶替底层依赖，在本机（甚至 Windows）直接验证 HTTP/TCP 服务、
+限位校验与单位换算：
 
 ```bash
-python test/dry_run_test.py
+python test/sdk_dry_run_test.py   # SDK 直连路径（25 项）
+python test/dry_run_test.py       # ROS 桥接路径（32 项）
 ```
 
-> 注意：这只是逻辑自测，不代替真机联调。真机首次测试请先 `auto_enable`
-> 并用小 `speed`（如 10）做小幅关节运动，确认工作空间无障碍。
+> 这只是逻辑自测，不代替真机联调。真机首次测试请用 `--speed 10` 做小幅关节运动，
+> 确认工作空间无障碍。
