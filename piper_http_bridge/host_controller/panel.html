@@ -69,6 +69,7 @@
   input[type=number]{width:76px;background:var(--card2);color:var(--txt);
        border:1px solid var(--line);border-radius:8px;padding:7px 8px;font-size:14px;
        font-family:ui-monospace,monospace;text-align:right}
+  .joint input[type=number],#gripStep{width:56px;padding:6px 4px;font-size:12px}
   .flash{outline:2px solid var(--acc);outline-offset:1px}
 </style>
 </head>
@@ -79,8 +80,7 @@
   <span id="en" class="pill">未知</span>
   <span id="mode" class="pill mode" title="move 模式">模式 —</span>
   <span style="flex:1"></span>
-  <span class="muted">步长</span>
-  <input type="number" id="stepNum" min="0.1" max="45" step="0.1" value="3"> °
+  <span class="muted">每个关节 / 夹爪 各有独立步长</span>
 </header>
 
 <div class="wrap">
@@ -94,6 +94,10 @@
       </div>
       <input type="range" id="grip" min="0" max="80" step="1" value="0">
       <div class="muted" style="text-align:center">实际开度 <b id="gripVal">0</b> mm</div>
+      <div class="row" style="justify-content:center;margin-top:8px">
+        <span class="muted">步长</span>
+        <input type="number" id="gripStep" min="0.5" max="80" step="0.5" value="10"> mm
+      </div>
     </div>
 
     <div class="card" id="camCard" style="display:none">
@@ -124,7 +128,7 @@
   <!-- 右:关节点动 + 说明 -->
   <div>
     <div class="card">
-      <h2>关节点动（按轴 · 按住连续，松开停止）</h2>
+      <h2>关节点动（按轴 · 右侧为各轴步长°）</h2>
       <div id="joints"></div>
     </div>
     <div class="card">
@@ -139,7 +143,7 @@
         <div><span class="kbd">G</span> 合抓</div>
         <div><span class="kbd">H</span> 放开</div>
       </div>
-      <p class="muted" style="margin-top:10px">提示：直接点动六个关节。按住按键/按钮可连续点动，松开即停。步长为每拍的角度（°)，在右上角输入框修改。</p>
+      <p class="muted" style="margin-top:10px">提示：直接点动六个关节。按住按键/按钮可连续点动，松开即停。每个关节的步长（°）在各自右侧输入框单独设置；夹爪步长（mm）在夹爪卡片里。</p>
     </div>
   </div>
 </div>
@@ -152,9 +156,11 @@ const $ = s => document.querySelector(s);
 const CAMERA_URL = "__CAMERA_URL__";
 const CAMERA_RTC_URL = "__CAMERA_WEBRTC_URL__";
 
-// 步长为数字输入:每拍关节转动的角度(°);夹爪按比例取 3x(mm)。
-function jointStep(){ const v=parseFloat($("#stepNum").value); return (isFinite(v)&&v>0)?v:3; }
-function gripStep(){ return jointStep()*3; }
+// 步长为数字输入:每个关节一个(°),夹爪单独一个(mm)。
+function _num(id, dflt){ const el=document.getElementById(id); if(!el) return dflt;
+  const v=parseFloat(el.value); return (isFinite(v)&&v>0)?v:dflt; }
+function jointStep(i){ return _num("js"+i, 3); }   // 关节 i 的步长(°)
+function gripStep(){ return _num("gripStep", 10); } // 夹爪步长(mm)
 
 // ---- 夹爪目标(命令侧) vs 实际(反馈侧) ----
 let gripTarget = 0;        // 本地维护的目标值(命令)
@@ -196,7 +202,7 @@ function flashKey(k){
 // ---------- 关节点动（按住连续，平滑流式） ----------
 const JREP_MS=25;   // 按住时的重复率 ~40Hz -> 平滑
 const _jj={i:null, d:0, timer:null};
-function jointStepOnce(i,d){ doCmd({action:"joint_jog",index:i,delta:d*jointStep()}); }
+function jointStepOnce(i,d){ doCmd({action:"joint_jog",index:i,delta:d*jointStep(i)}); }
 function startJoint(i,d){
   const same=(_jj.i===i && _jj.d===d);
   _jj.i=i; _jj.d=d;
@@ -273,7 +279,8 @@ const JOINT_KEY=[["1","2"],["3","4"],["5","6"],["7","8"],["9","0"],["-","="]];
     row.innerHTML=`<span class="name">${n}</span>
       <button data-joint="${i}:-1"><span class="kbd">${JOINT_KEY[i][0]}</span> −</button>
       <span class="val" id="jv${i}">—</span>
-      <button data-joint="${i}:+1"><span class="kbd">${JOINT_KEY[i][1]}</span> +</button>`;
+      <button data-joint="${i}:+1"><span class="kbd">${JOINT_KEY[i][1]}</span> +</button>
+      <input type="number" id="js${i}" min="0.1" max="90" step="0.1" value="3" title="步长(°)">`;
     box.appendChild(row);
     row.querySelectorAll("button").forEach(b=>{
       const d=Number(b.dataset.joint.split(":")[1]);
