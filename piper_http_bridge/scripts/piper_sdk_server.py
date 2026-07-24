@@ -18,6 +18,7 @@ import argparse
 import json
 import logging
 import subprocess
+import sys
 import threading
 import time
 
@@ -74,16 +75,22 @@ def bring_can_up(iface, bitrate=1000000, log=logging.getLogger("piper_sdk_server
               "Run: sudo ip link set %s up type can bitrate %d", iface, iface, bitrate)
     return False
 
+log = logging.getLogger("piper_sdk_server")
+
 try:
     from piper_sdk import C_PiperInterface_V2 as _Piper
-except Exception:  # very old SDKs only expose C_PiperInterface
+except Exception as _e1:  # very old SDKs only expose C_PiperInterface
     try:
         from piper_sdk import C_PiperInterface as _Piper
     except Exception as e:
         _Piper = None
         _IMPORT_ERR = e
-
-log = logging.getLogger("piper_sdk_server")
+        print("=" * 60, file=sys.stderr)
+        print("FATAL: could not import piper_sdk.", file=sys.stderr)
+        print("  import error: %s" % e, file=sys.stderr)
+        print("Install it for the SAME python3 that runs this service:", file=sys.stderr)
+        print("  sudo python3 -m pip install --upgrade python-can piper_sdk", file=sys.stderr)
+        print("=" * 60, file=sys.stderr)
 
 
 class PiperSDKBackend(object):

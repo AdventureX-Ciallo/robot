@@ -91,7 +91,9 @@ export DEBIAN_FRONTEND=noninteractive
 $SUDO apt-get update -qq
 if [[ "$BACKEND" == "sdk" ]]; then
   $SUDO apt-get install -y -qq can-utils ethtool iproute2 python3-pip > /dev/null
-  python3 -m pip install --quiet --upgrade python-can piper_sdk
+  # The service runs as root and imports the SYSTEM python3, so install the
+  # SDK system-wide (root), not just for the calling user.
+  $SUDO python3 -m pip install --quiet --upgrade python-can piper_sdk
   ok "deps ready (can-utils, piper_sdk) -- no ROS needed"
 else
   command -v git >/dev/null 2>&1 || die "git not found (sudo apt install git)."
