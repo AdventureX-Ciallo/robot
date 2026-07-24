@@ -75,12 +75,17 @@ class Controller(object):
             host, port = hostport, 8080
         self.client = pc.PiperClient(host, http_port=port, token=token)
         self.speed = speed
+        self._last_joints = None     # last commanded joints (base for jog deltas)
         self._lock = threading.Lock()
 
     # ---- state ---------------------------------------------------------
     def state(self):
         try:
-            return {"ok": True, "state": self.client.state()}
+            st = self.client.state()
+            # Correct the jog base from real feedback so drift doesn't accumulate.
+            if isinstance(st, dict) and st.get("joints_deg"):
+                self._last_joints = list(st["joints_deg"])
+            return {"ok": True, "state": st}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -89,14 +94,23 @@ class Controller(object):
         index = int(index)
         if not 0 <= index <= 5:
             raise pc.PiperError("joint index must be 0..5")
+        delta = float(delta_deg)
         with self._lock:
-            st = self.client.state()
-            joints = st.get("joints_deg")
-            if not joints:
-                raise pc.PiperError("no joint feedback yet")
-            joints = list(joints)
-            joints[index] = joints[index] + float(delta_deg)
+            # Use the last commanded joints as the base when available. A jog
+            # applies a *relative* delta, so chaining from our own last command
+            # avoids an extra HTTP /state round-trip per tick (which would make
+            # hold-to-jog lag behind the fast repeat rate on weak links). The
+            # cache is corrected by feedback on the next state poll.
+            base = self._last_joints
+            if base is None:
+                st = self.client.state()
+                base = st.get("joints_deg")
+                if not base:
+                    raise pc.PiperError("no joint feedback yet")
+            joints = list(base)
+            joints[index] = joints[index] + delta
             res = self.client.joint_ctrl(joints, speed=self.speed)
+            self._last_joints = joints
         return {"ok": True, "joints_deg": joints}
 
     # ---- gripper / mode ------------------------------------------------
@@ -204,33 +218,59 @@ class WSHub(object):
             time.sleep(self.interval)
 
 
-def _ws_consume_one_frame(rfile):
-    """Block until one full WebSocket frame arrives (to catch the client
-    closing / erroring). Returns False when the connection is dead."""
-    try:
-        hdr = rfile.read(2)
-        if len(hdr) < 2:
-            return False
-        opcode = hdr[0] & 0x0F
-        length = hdr[1] & 0x7F
-        if length == 126:
-            ext = rfile.read(2)
-            if len(ext) < 2:
-                return False
-            length = struct.unpack("!H", ext)[0]
-        elif length == 127:
-            ext = rfile.read(8)
-            if len(ext) < 8:
-                return False
-            length = struct.unpack("!Q", ext)[0]
-        if hdr[1] & 0x80:                       # masked -> consume mask key
-            if len(rfile.read(4)) < 4:
-                return False
-        if length and len(rfile.read(length)) < length:
-            return False
-        return opcode != 0x8                    # 0x8 == close frame
-    except (BrokenPipeError, ConnectionResetError, OSError, ValueError):
-        return False
+def _ws_read_text_frame(rfile):
+    """Read one WebSocket frame and return its decoded text payload.
+
+    Control (ping/pong/close) frames are handled inline and skipped. Returns
+    None when the connection is dead or the peer sent a close frame.
+    """
+    while True:
+        try:
+            hdr = rfile.read(2)
+            if len(hdr) < 2:
+                return None
+            fin = hdr[0] & 0x80
+            opcode = hdr[0] & 0x0F
+            length = hdr[1] & 0x7F
+            if length == 126:
+                ext = rfile.read(2)
+                if len(ext) < 2:
+                    return None
+                length = struct.unpack("!H", ext)[0]
+            elif length == 127:
+                ext = rfile.read(8)
+                if len(ext) < 8:
+                    return None
+                length = struct.unpack("!Q", ext)[0]
+            mask = hdr[1] & 0x80
+            key = b""
+            if mask:                            # client frames are masked
+                key = rfile.read(4)
+                if len(key) < 4:
+                    return None
+            payload = b""
+            if length:
+                payload = rfile.read(length)
+                if len(payload) < length:
+                    return None
+            if mask:
+                payload = bytes(payload[i] ^ key[i % 4] for i in range(length))
+        except (BrokenPipeError, ConnectionResetError, OSError, ValueError):
+            return None
+
+        if opcode == 0x8:                       # close
+            return None
+        if opcode in (0x9, 0xA):                # ping / pong -> ignore
+            continue
+        if opcode in (0x1, 0x2, 0x0):           # text / binary / continuation
+            if not fin:
+                # Fragmented messages aren't used by the panel; treat as closed.
+                return None
+            try:
+                return payload.decode("utf-8")
+            except Exception:
+                return None
+        # unknown opcode -> ignore and keep reading
 
 
 # ---------------------------------------------------------------------------
@@ -297,11 +337,31 @@ def make_handler(ctrl, panel_html, hub=None):
                 return
             client = WSClient(self.rfile, self.wfile)
             hub.add(client)
-            # Park this thread until the client disconnects so the HTTP server
-            # does not tear down the (now upgraded) socket.
+            # Read this client's incoming frames: control commands run over the
+            # same socket (replies carry the request's "_id"); state keeps being
+            # pushed by the hub. Park here until the client disconnects so the
+            # HTTP server does not tear down the (now upgraded) socket.
             while client.alive:
-                if not _ws_consume_one_frame(self.rfile):
+                payload = _ws_read_text_frame(self.rfile)
+                if payload is None:
                     client.alive = False
+                    break
+                try:
+                    p = json.loads(payload)
+                    out = self._dispatch(p)
+                    if isinstance(p, dict) and "_id" in p:
+                        out = dict(out) if isinstance(out, dict) \
+                            else {"ok": True, "r": out}
+                        out["_id"] = p["_id"]
+                        client.send(json.dumps(out))
+                except Exception as e:
+                    try:
+                        err = {"ok": False, "error": str(e)}
+                        if isinstance(p, dict) and "_id" in p:
+                            err["_id"] = p["_id"]
+                        client.send(json.dumps(err))
+                    except Exception:
+                        client.alive = False
             self.close_connection = True
 
         def do_POST(self):

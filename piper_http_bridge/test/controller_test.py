@@ -171,6 +171,41 @@ def _ws_read_text_frame(sock_file):
     return sock_file.read(length).decode("utf-8")
 
 
+def _ws_client_frame(text):
+    """Encode one masked client->server text frame (RFC6455)."""
+    payload = text.encode("utf-8")
+    mask = os.urandom(4)
+    header = bytearray([0x81])
+    n = len(payload)
+    if n < 126:
+        header.append(0x80 | n)
+    elif n < 0x10000:
+        header.append(0x80 | 126)
+        header += struct.pack("!H", n)
+    else:
+        header.append(0x80 | 127)
+        header += struct.pack("!Q", n)
+    header += mask
+    masked = bytes(payload[i] ^ mask[i % 4] for i in range(n))
+    return bytes(header) + masked
+
+
+def _ws_handshake(sock_file, sock, key):
+    req = ("GET /ws HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+           "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+           "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n" % key)
+    sock.sendall(req.encode("ascii"))
+    status = sock_file.readline().decode("latin-1")
+    accept = ""
+    while True:
+        line = sock_file.readline().decode("latin-1")
+        if line in ("\r\n", "\n", ""):
+            break
+        if line.lower().startswith("sec-websocket-accept:"):
+            accept = line.split(":", 1)[1].strip()
+    return status, accept
+
+
 def test_websocket(mod):
     print("[websocket state push]")
     c = mod.Controller("http://127.0.0.1:8080")
@@ -183,20 +218,8 @@ def test_websocket(mod):
         s = socket.create_connection(("127.0.0.1", port), timeout=5)
         f = s.makefile("rb")
         key = base64.b64encode(os.urandom(16)).decode("ascii")
-        req = ("GET /ws HTTP/1.1\r\nHost: 127.0.0.1\r\n"
-               "Upgrade: websocket\r\nConnection: Upgrade\r\n"
-               "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n" % key)
-        s.sendall(req.encode("ascii"))
-        # read the 101 response headers (terminated by a blank line)
-        status = f.readline().decode("latin-1")
+        status, accept = _ws_handshake(f, s, key)
         check("ws 101 switching protocols", "101" in status)
-        accept = ""
-        while True:
-            line = f.readline().decode("latin-1")
-            if line in ("\r\n", "\n", ""):
-                break
-            if line.lower().startswith("sec-websocket-accept:"):
-                accept = line.split(":", 1)[1].strip()
         check("ws accept header matches", accept == mod._ws_accept(key))
         # the hub should push state frames containing the fake gripper value
         payload = None
@@ -210,12 +233,55 @@ def test_websocket(mod):
         httpd.shutdown(); httpd.server_close()
 
 
+def test_ws_control(mod):
+    print("[websocket control channel]")
+    c = mod.Controller("http://127.0.0.1:8080")
+    hub = mod.WSHub(c, hz=50.0)
+    handler = mod.make_handler(c, "<html>panel</html>", hub)
+    httpd = mod.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        s = socket.create_connection(("127.0.0.1", port), timeout=5)
+        f = s.makefile("rb")
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        _ws_handshake(f, s, key)
+        # send a joint_jog command over the socket, with a correlation id
+        cmd = json.dumps({"action": "joint_jog", "index": 1, "delta": 2, "_id": 42})
+        s.sendall(_ws_client_frame(cmd))
+        # frames arrive interleaved with state pushes; find our reply by _id
+        reply = None
+        for _ in range(80):
+            m = json.loads(_ws_read_text_frame(f))
+            if m.get("_id") == 42:
+                reply = m
+                break
+        check("ws control reply ok", reply is not None and reply.get("ok") is True)
+        check("ws control jogged joint2",
+              reply is not None and abs(reply["joints_deg"][1] - 22.0) < 1e-6)
+
+        # an unknown action over the socket replies with an error carrying _id
+        s.sendall(_ws_client_frame(json.dumps({"action": "bogus", "_id": 7})))
+        reply = None
+        for _ in range(80):
+            m = json.loads(_ws_read_text_frame(f))
+            if m.get("_id") == 7:
+                reply = m
+                break
+        check("ws unknown action -> error",
+              reply is not None and reply.get("ok") is False)
+        s.close()
+    finally:
+        httpd.shutdown(); httpd.server_close()
+
+
 def main():
     mod = load_controller()
     test_joint_jog(mod)
     test_gripper_and_modes(mod)
     test_http_panel(mod)
     test_websocket(mod)
+    test_ws_control(mod)
     print("\n=================================")
     print("passed: %d   failed: %d" % (len(PASSED), len(FAILED)))
     for f in FAILED:
