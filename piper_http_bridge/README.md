@@ -184,14 +184,38 @@ print(cmd(action="state"))
 
 ---
 
-## 四、本地干跑测试（无需真机/无需ROS/无需CAN）
+## 四、Python 客户端（上位机直接调用）
 
-两套测试都用桩顶替底层依赖，在本机（甚至 Windows）直接验证 HTTP/TCP 服务、
+`client/piper_client.py` 是**纯标准库**客户端（无需 pip 安装），同时支持 HTTP 与 TCP：
+
+```python
+from piper_client import PiperClient
+arm = PiperClient("192.168.1.100", token="你的密钥")   # use_tcp=True 走 TCP
+arm.enable()
+arm.joint_ctrl([0, 30, -30, 0, 20, 0], speed=10)      # 度
+arm.pose_ctrl(200, 0, 150, 0, 90, 0)                  # mm / 度
+arm.gripper(40)                                       # mm
+print(arm.state())
+arm.go_zero()
+arm.disable()
+```
+
+命令行用法：
+```bash
+python client/piper_client.py --host 192.168.1.100 --token 你的密钥 --state
+python client/piper_client.py --host 192.168.1.100 --token 你的密钥 --joints 0,30,-30,0,20,0 --speed 10
+python client/piper_client.py --host 192.168.1.100 --token 你的密钥 --demo   # 完整流程演示
+```
+
+## 五、本地干跑测试（无需真机/无需ROS/无需CAN）
+
+三套测试都用桩顶替底层依赖，在本机（甚至 Windows）直接验证 HTTP/TCP 服务、
 限位校验与单位换算：
 
 ```bash
 python test/sdk_dry_run_test.py   # SDK 直连路径（25 项）
 python test/dry_run_test.py       # ROS 桥接路径（32 项）
+python test/client_test.py        # 客户端 HTTP+TCP 往返（23 项）
 ```
 
 > 这只是逻辑自测，不代替真机联调。真机首次测试请用 `--speed 10` 做小幅关节运动，
