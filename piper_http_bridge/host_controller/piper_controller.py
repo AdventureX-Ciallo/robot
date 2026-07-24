@@ -4,8 +4,8 @@
 piper_controller -- upper-machine (host) controller with a zero-dependency
 web control panel for the Piper 6-axis arm.
 
-Treats the gripper as an oriented point (tool tip) and jogs it in Cartesian
-space via the arm's HTTP endpoint (piper_sdk_server / piper_http_bridge).
+Jogs each of the six joints directly (joint space) via the arm's HTTP
+endpoint (piper_sdk_server / piper_http_bridge). No Cartesian jog.
 
 Run:
     python piper_controller.py --endpoint http://192.168.1.100:8080 --token SECRET
@@ -13,16 +13,17 @@ then open:
     http://<this-host>:8000/
 
 Keyboard (focus on the page):
-    W / S   : +X / -X        (forward / back)
-    A / D   : +Y / -Y        (left / right)
-    Q / E   : +Z / -Z        (up / down)
-    X / Z   : roll + / roll -
-    C / V   : pitch + / pitch -
-    R / F   : yaw + / yaw -
+    1 / 2   : joint 1  - / +
+    3 / 4   : joint 2  - / +
+    5 / 6   : joint 3  - / +
+    7 / 8   : joint 4  - / +
+    9 / 0   : joint 5  - / +
+    - / =   : joint 6  - / +
     G / H   : gripper close / open
 Hold a key or an on-screen button to jog continuously; release to stop.
 Space / Enter are intentionally NOT bound (they clash with Tab focus);
 enable / disable / estop / go-zero are on-page buttons only.
+The joint step is a plain number of degrees set on the panel.
 All of the above is also clickable on the panel.
 
 State is pushed to the browser over a WebSocket (~10 Hz) for a smooth,
@@ -59,21 +60,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "client"))
 import piper_client as pc  # noqa: E402
 
-# Cartesian workspace clamp (metres) -- defensive, keep the tool tip sane.
-# Loosen via CLI if your setup needs a bigger envelope.
-DEFAULT_LIMITS = {"x": (0.05, 0.60), "y": (-0.45, 0.45), "z": (0.0, 0.60)}
-
-# Cartesian jog step (metres / degrees) per key press.
-STEP_TRANS = {"S": 0.005, "M": 0.02, "L": 0.05}     # small/medium/large
-STEP_ROT = {"S": 2.0, "M": 5.0, "L": 15.0}          # degrees
-STEP_JOINT = {"S": 1.0, "M": 3.0, "L": 10.0}        # degrees
-STEP_GRIP = {"S": 2.0, "M": 10.0, "L": 40.0}        # mm
-
 
 class Controller(object):
     """Holds endpoint client + cached state; applies jogs safely."""
 
-    def __init__(self, endpoint, token="", speed=30, limits=None):
+    def __init__(self, endpoint, token="", speed=30):
         self.ep = endpoint.rstrip("/")
         # parse host/port for piper_client
         hostport = self.ep.split("://", 1)[-1].split("/")[0]
@@ -84,7 +75,6 @@ class Controller(object):
             host, port = hostport, 8080
         self.client = pc.PiperClient(host, http_port=port, token=token)
         self.speed = speed
-        self.limits = limits or DEFAULT_LIMITS
         self._lock = threading.Lock()
 
     # ---- state ---------------------------------------------------------
@@ -93,36 +83,6 @@ class Controller(object):
             return {"ok": True, "state": self.client.state()}
         except Exception as e:
             return {"ok": False, "error": str(e)}
-
-    # ---- helpers -------------------------------------------------------
-    def _cur_pose(self):
-        st = self.client.state()
-        ep = st.get("end_pose")
-        if not ep:
-            raise pc.PiperError("no end_pose feedback yet (arm enabled & CAN up?)")
-        # state gives mm / deg -> convert to m / deg for the endpoint's pose_ctrl
-        return (ep["x"] / 1000.0, ep["y"] / 1000.0, ep["z"] / 1000.0,
-                ep["roll"], ep["pitch"], ep["yaw"])
-
-    def _clamp(self, axis, v):
-        lo, hi = self.limits[axis]
-        return max(lo, min(hi, v))
-
-    # ---- Cartesian jog (heading-relative, smoothed) ---------------------
-    def jog(self, fwd=0.0, right=0.0, up=0.0, roll=0.0, pitch=0.0, yaw=0.0):
-        """One smooth jog step, streamed to the endpoint's `jog` action.
-
-        fwd/right/up in metres, roll/pitch/yaw in degrees (already scaled by
-        the caller to a per-tick increment). Steps are clamped small and the
-        server integrates them, so holding a key produces continuous motion.
-        """
-        fwd = max(-0.02, min(0.02, float(fwd)))
-        right = max(-0.02, min(0.02, float(right)))
-        up = max(-0.02, min(0.02, float(up)))
-        roll = max(-4.0, min(4.0, float(roll)))
-        pitch = max(-4.0, min(4.0, float(pitch)))
-        yaw = max(-4.0, min(4.0, float(yaw)))
-        return self.client.jog(fwd, right, up, roll, pitch, yaw)
 
     # ---- joint jog -----------------------------------------------------
     def joint_jog(self, index, delta_deg):
@@ -359,14 +319,6 @@ def make_handler(ctrl, panel_html, hub=None):
 
         def _dispatch(self, p):
             a = p.get("action")
-            if a == "jog":
-                try:
-                    return ctrl.jog(p.get("fwd", 0), p.get("right", 0),
-                                    p.get("up", 0), p.get("roll", 0),
-                                    p.get("pitch", 0), p.get("yaw", 0))
-                except Exception as e:
-                    # IK/endpoint failure -> don't crash; tell the panel
-                    return {"ok": False, "error": str(e)}
             if a == "joint_jog":
                 return ctrl.joint_jog(p.get("index", 0), p.get("delta", 0))
             if a == "gripper":

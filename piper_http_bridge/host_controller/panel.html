@@ -66,6 +66,9 @@
   #cam,#camRtc{width:100%;border-radius:8px;background:#000;aspect-ratio:16/9;object-fit:cover;
        border:1px solid var(--line)}
   input[type=range]{width:100%;accent-color:var(--acc2);cursor:pointer}
+  input[type=number]{width:76px;background:var(--card2);color:var(--txt);
+       border:1px solid var(--line);border-radius:8px;padding:7px 8px;font-size:14px;
+       font-family:ui-monospace,monospace;text-align:right}
   .flash{outline:2px solid var(--acc);outline-offset:1px}
 </style>
 </head>
@@ -77,39 +80,12 @@
   <span id="mode" class="pill mode" title="move 模式">模式 —</span>
   <span style="flex:1"></span>
   <span class="muted">步长</span>
-  <div class="seg" id="stepSeg">
-    <button data-s="S">小</button>
-    <button data-s="M" class="on">中</button>
-    <button data-s="L">大</button>
-  </div>
+  <input type="number" id="stepNum" min="0.1" max="45" step="0.1" value="3"> °
 </header>
 
 <div class="wrap">
-  <!-- 左:笛卡尔点动 + 夹爪 -->
+  <!-- 左:夹爪 + 摄像头 -->
   <div>
-    <div class="card">
-      <h2>末端点动（相对朝向 · 按住连续，松开停止）</h2>
-      <h3 class="sub">平移（随末端朝向）</h3>
-      <div class="pad">
-        <span></span><button data-jog="fwd:+1"><span class="kbd">W</span><span class="lbl">前</span></button><span></span>
-        <button data-jog="right:+1"><span class="kbd">A</span><span class="lbl">左</span></button>
-        <button data-jog="fwd:-1"><span class="kbd">S</span><span class="lbl">后</span></button>
-        <button data-jog="right:-1"><span class="kbd">D</span><span class="lbl">右</span></button>
-        <button data-jog="up:+1"><span class="kbd">Q</span><span class="lbl">上</span></button>
-        <span></span>
-        <button data-jog="up:-1"><span class="kbd">E</span><span class="lbl">下</span></button>
-      </div>
-      <h3 class="sub">旋转（滚转绕工具光轴）</h3>
-      <div class="pad">
-        <button data-jog="roll:+1"><span class="kbd">X</span><span class="lbl">滚转 +</span></button>
-        <button data-jog="pitch:+1"><span class="kbd">C</span><span class="lbl">俯仰 +</span></button>
-        <button data-jog="yaw:+1"><span class="kbd">R</span><span class="lbl">偏航 +</span></button>
-        <button data-jog="roll:-1"><span class="kbd">Z</span><span class="lbl">滚转 −</span></button>
-        <button data-jog="pitch:-1"><span class="kbd">V</span><span class="lbl">俯仰 −</span></button>
-        <button data-jog="yaw:-1"><span class="kbd">F</span><span class="lbl">偏航 −</span></button>
-      </div>
-    </div>
-
     <div class="card">
       <h2>夹爪</h2>
       <div class="row">
@@ -148,22 +124,22 @@
   <!-- 右:关节点动 + 说明 -->
   <div>
     <div class="card">
-      <h2>按轴点动（关节）</h2>
+      <h2>关节点动（按轴 · 按住连续，松开停止）</h2>
       <div id="joints"></div>
     </div>
     <div class="card">
       <h2>按键说明</h2>
       <div class="legend">
-        <div><span class="kbd">W</span>/<span class="kbd">S</span> 前/后</div>
-        <div><span class="kbd">A</span>/<span class="kbd">D</span> 左/右</div>
-        <div><span class="kbd">Q</span>/<span class="kbd">E</span> 上/下</div>
-        <div><span class="kbd">X</span>/<span class="kbd">Z</span> 滚转±</div>
-        <div><span class="kbd">C</span>/<span class="kbd">V</span> 俯仰±</div>
-        <div><span class="kbd">R</span>/<span class="kbd">F</span> 偏航±</div>
+        <div><span class="kbd">1</span>/<span class="kbd">2</span> J1 −/+</div>
+        <div><span class="kbd">3</span>/<span class="kbd">4</span> J2 −/+</div>
+        <div><span class="kbd">5</span>/<span class="kbd">6</span> J3 −/+</div>
+        <div><span class="kbd">7</span>/<span class="kbd">8</span> J4 −/+</div>
+        <div><span class="kbd">9</span>/<span class="kbd">0</span> J5 −/+</div>
+        <div><span class="kbd">-</span>/<span class="kbd">=</span> J6 −/+</div>
         <div><span class="kbd">G</span> 合抓</div>
         <div><span class="kbd">H</span> 放开</div>
       </div>
-      <p class="muted" style="margin-top:10px">提示：按住按键/按钮可连续点动，松开即停。前后左右随末端朝向变化，滚转绕工具自身光轴。</p>
+      <p class="muted" style="margin-top:10px">提示：直接点动六个关节。按住按键/按钮可连续点动，松开即停。步长为每拍的角度（°)，在右上角输入框修改。</p>
     </div>
   </div>
 </div>
@@ -175,13 +151,10 @@
 const $ = s => document.querySelector(s);
 const CAMERA_URL = "__CAMERA_URL__";
 const CAMERA_RTC_URL = "__CAMERA_WEBRTC_URL__";
-let stepSize = "M";
-// 连续点动:每个 tick 的增量(m / deg);重复率 ~40Hz -> 平滑
-const TICK_MS = 25;
-const TRANS = {S:0.002, M:0.005, L:0.012};   // 每 tick 平移 (m)  -> 0.08/0.2/0.48 m/s
-const ROT   = {S:0.4, M:1.0, L:2.4};          // 每 tick 旋转 (deg)-> 16/40/96 deg/s
-const JSTEP = {S:1, M:3, L:10};
-const GRIP  = {S:2, M:10, L:40};
+
+// 步长为数字输入:每拍关节转动的角度(°);夹爪按比例取 3x(mm)。
+function jointStep(){ const v=parseFloat($("#stepNum").value); return (isFinite(v)&&v>0)?v:3; }
+function gripStep(){ return jointStep()*3; }
 
 // ---- 夹爪目标(命令侧) vs 实际(反馈侧) ----
 let gripTarget = 0;        // 本地维护的目标值(命令)
@@ -213,75 +186,54 @@ function doCmd(payload){
 function flash(el){ if(!el) return; el.classList.add("press");
   setTimeout(()=>el.classList.remove("press"),160); }
 function flashKey(k){
-  const map={g:"#gClose",h:"#gOpen"};
-  if(map[k]) return flash($(map[k]));
-  const spec=JOGMAP[k];
-  if(!spec) return;
-  const axis=Object.keys(spec)[0], sign=(spec[axis]>0?"+1":"-1");
-  const btn=document.querySelector(`[data-jog="${axis}:${sign}"]`);
+  if(k==="g") return flash($("#gClose"));
+  if(k==="h") return flash($("#gOpen"));
+  const spec=KEYJ[k]; if(!spec) return;
+  const btn=document.querySelector(`[data-joint="${spec.i}:${spec.d>0?"+1":"-1"}"]`);
   if(btn) flash(btn);
 }
 
-// ---------- 笛卡尔点动（相对朝向，平滑流式） ----------
-// spec 的键: fwd/right/up(m)  roll/pitch/yaw(deg)，值为方向 ±1
-function scaled(spec){
-  const d={action:"jog"};
-  for(const k in spec){ const v=spec[k];
-    d[k]= (k==="fwd"||k==="right"||k==="up") ? v*TRANS[stepSize] : v*ROT[stepSize]; }
-  return d;
+// ---------- 关节点动（按住连续，平滑流式） ----------
+const JREP_MS=25;   // 按住时的重复率 ~40Hz -> 平滑
+const _jj={i:null, d:0, timer:null};
+function jointStepOnce(i,d){ doCmd({action:"joint_jog",index:i,delta:d*jointStep()}); }
+function startJoint(i,d){
+  const same=(_jj.i===i && _jj.d===d);
+  _jj.i=i; _jj.d=d;
+  if(_jj.timer==null){ _jj.timer=setInterval(()=>jointStepOnce(_jj.i,_jj.d),JREP_MS); }
+  if(!same) jointStepOnce(i,d);       // 立即一拍,不等首个 interval
 }
-// fire-and-forget 队列:按住时按 ~40Hz 连续发，不等待每个响应(否则一顿一顿)
-const _jog={active:null, timer:null, inFlight:false, pending:false};
-function _tick(){
-  if(!_jog.active) return;
-  if(_jog.inFlight){ _jog.pending=true; return; }
-  _jog.inFlight=true; _jog.pending=false;
-  doCmd(scaled(_jog.active)).finally(()=>{
-    _jog.inFlight=false;
-    if(_jog.pending){ _jog.pending=false; setTimeout(_tick,0); }
-  });
-}
-function startJog(spec){
-  const same=_jog.active && JSON.stringify(_jog.active)===JSON.stringify(spec);
-  _jog.active=spec;
-  if(_jog.timer==null){ _jog.timer=setInterval(_tick,TICK_MS); }
-  if(!same) _tick();
-}
-function stopJog(){ _jog.active=null;
-  if(_jog.timer!=null){ clearInterval(_jog.timer); _jog.timer=null; } }
+function stopJoint(){ _jj.i=null;
+  if(_jj.timer!=null){ clearInterval(_jj.timer); _jj.timer=null; } }
 
-const JOGMAP={w:{fwd:+1},s:{fwd:-1},a:{right:+1},d:{right:-1},q:{up:+1},e:{up:-1},
-              x:{roll:+1},z:{roll:-1},c:{pitch:+1},v:{pitch:-1},r:{yaw:+1},f:{yaw:-1}};
-
-// 按钮(鼠标/触屏)按住连续
-document.querySelectorAll("[data-jog]").forEach(b=>{
-  const [axis,sign]=b.dataset.jog.split(":");
-  const spec={[axis]:Number(sign)};
-  const start=e=>{e.preventDefault(); startJog(spec); flash(b);};
-  const stop=()=>stopJog();
-  b.addEventListener("mousedown",start); b.addEventListener("touchstart",start,{passive:false});
-  b.addEventListener("mouseup",stop); b.addEventListener("mouseleave",stop);
-  b.addEventListener("touchend",stop);
-});
+// 键盘 -> 关节/方向(0-based 索引)
+const KEYJ={"1":{i:0,d:-1},"2":{i:0,d:+1},
+            "3":{i:1,d:-1},"4":{i:1,d:+1},
+            "5":{i:2,d:-1},"6":{i:2,d:+1},
+            "7":{i:3,d:-1},"8":{i:3,d:+1},
+            "9":{i:4,d:-1},"0":{i:4,d:+1},
+            "-":{i:5,d:-1},"=":{i:5,d:+1}};
 
 // 键盘:按住连续,松开停止;不含 Space/Enter(避免与 Tab/按钮冲突)
 const _keyHeld={};
 document.addEventListener("keydown",e=>{
   const k=e.key.toLowerCase();
-  if(e.target.tagName==="INPUT") return;      // 不干扰滑条等输入
+  if(e.target.tagName==="INPUT") return;      // 不干扰步长/滑条等输入
   if(e.repeat) return;
-  if(k==="g"){ gripTo(gripActual-GRIP[stepSize]); flashKey("g"); return; }
-  if(k==="h"){ gripTo(gripActual+GRIP[stepSize]); flashKey("h"); return; }
-  if(JOGMAP[k]){ flashKey(k); _keyHeld[k]=true; startJog(JOGMAP[k]); }
+  if(k==="g"){ gripTo(gripActual-gripStep()); flashKey("g"); return; }
+  if(k==="h"){ gripTo(gripActual+gripStep()); flashKey("h"); return; }
+  const spec=KEYJ[k];
+  if(spec){ flashKey(k); _keyHeld[k]=true; startJoint(spec.i,spec.d); }
 });
 document.addEventListener("keyup",e=>{
   const k=e.key.toLowerCase();
-  if(JOGMAP[k]){ delete _keyHeld[k];
-    const still=Object.keys(_keyHeld).filter(x=>JOGMAP[x]);
-    if(still.length) startJog(JOGMAP[still[still.length-1]]); else stopJog();
+  if(KEYJ[k]){ delete _keyHeld[k];
+    const still=Object.keys(_keyHeld).filter(x=>KEYJ[x]);
+    if(still.length){ const s=KEYJ[still[still.length-1]]; startJoint(s.i,s.d); }
+    else stopJoint();
   }
 });
-window.addEventListener("blur",()=>{ for(const k in _keyHeld) delete _keyHeld[k]; stopJog(); });
+window.addEventListener("blur",()=>{ for(const k in _keyHeld) delete _keyHeld[k]; stopJoint(); });
 
 // ---------- 夹爪 ----------
 function gripTo(mm){
@@ -291,7 +243,7 @@ function gripTo(mm){
 }
 function gripHandler(btn,dir){
   let t=null;
-  const stepOnce=()=>gripTo(gripActual+dir*GRIP[stepSize]);
+  const stepOnce=()=>gripTo(gripActual+dir*gripStep());
   const start=e=>{e.preventDefault(); stepOnce(); flash(btn);
                   t=setInterval(stepOnce,140);};
   const stop=()=>{ if(t){clearInterval(t);t=null;} };
@@ -313,33 +265,26 @@ $("#btnZero").onclick   =()=>{flash($("#btnZero")); doCmd({action:"go_zero"});};
 
 // ---------- 关节点动 ----------
 const JOINT_NAMES=["J1","J2","J3","J4","J5","J6"];
+const JOINT_KEY=[["1","2"],["3","4"],["5","6"],["7","8"],["9","0"],["-","="]];
 (function buildJoints(){
   const box=$("#joints");
   JOINT_NAMES.forEach((n,i)=>{
     const row=document.createElement("div"); row.className="joint";
     row.innerHTML=`<span class="name">${n}</span>
-      <button data-d="-1">−</button>
+      <button data-joint="${i}:-1"><span class="kbd">${JOINT_KEY[i][0]}</span> −</button>
       <span class="val" id="jv${i}">—</span>
-      <button data-d="+1">+</button>`;
+      <button data-joint="${i}:+1"><span class="kbd">${JOINT_KEY[i][1]}</span> +</button>`;
     box.appendChild(row);
     row.querySelectorAll("button").forEach(b=>{
-      let t=null; const d=Number(b.dataset.d);
-      const start=e=>{e.preventDefault(); flash(b);
-        doCmd({action:"joint_jog",index:i,delta:d*JSTEP[stepSize]});
-        t=setInterval(()=>doCmd({action:"joint_jog",index:i,delta:d*JSTEP[stepSize]}),140);};
-      const stop=()=>{ if(t){clearInterval(t);t=null;} };
+      const d=Number(b.dataset.joint.split(":")[1]);
+      const start=e=>{e.preventDefault(); flash(b); startJoint(i,d);};
+      const stop=()=>stopJoint();
       b.addEventListener("mousedown",start); b.addEventListener("touchstart",start,{passive:false});
       b.addEventListener("mouseup",stop); b.addEventListener("mouseleave",stop);
       b.addEventListener("touchend",stop);
     });
   });
 })();
-
-// ---------- 步长 ----------
-$("#stepSeg").querySelectorAll("button").forEach(b=>{
-  b.onclick=()=>{ stepSize=b.dataset.s;
-    $("#stepSeg").querySelectorAll("button").forEach(x=>x.classList.toggle("on",x===b)); };
-});
 
 // ---------- 摄像头 ----------
 // 低延迟首选 WebRTC(MediaMTX WHEP);未配置则用 MJPEG <img> 兜底。

@@ -143,15 +143,6 @@ class PiperClient(object):
         """mode: 'joint' (MOVE J) or 'pose' (MOVE P)."""
         return self.cmd("set_mode", mode=mode)
 
-    def jog(self, fwd=0.0, right=0.0, up=0.0, roll=0.0, pitch=0.0, yaw=0.0):
-        """Heading-relative Cartesian jog (streamed smoothly by the server).
-
-        fwd/right/up in metres; roll/pitch/yaw in degrees. fwd/left follow the
-        tool's yaw, roll rotates about the tool's forward axis.
-        """
-        return self.cmd("jog", fwd=fwd, right=right, up=up,
-                        roll=roll, pitch=pitch, yaw=yaw)
-
 
 # ---------------------------------------------------------------------------
 # CLI

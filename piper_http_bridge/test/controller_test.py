@@ -3,8 +3,8 @@
 """
 Dry-run test for the host web controller (piper_controller.py). No arm, no
 endpoint server process -- the endpoint is faked by monkeypatching the
-controller's piper_client so we can verify jog composition, Cartesian
-clamping, joint jog, gripper and the panel HTTP API.
+controller's piper_client so we can verify joint jog, gripper and the
+panel HTTP API (and the WebSocket state push).
 
 Run:  python test/controller_test.py   ->  exit 0 on success
 """
@@ -69,10 +69,6 @@ class FakeClient:
         self._state["joints_deg"] = list(joints)
         return {"ok": True}
 
-    def jog(self, fwd=0.0, right=0.0, up=0.0, roll=0.0, pitch=0.0, yaw=0.0):
-        self._rec("jog", fwd, right, up, roll, pitch, yaw)
-        return {"ok": True}
-
 
 def load_controller():
     fake = types.ModuleType("piper_client")
@@ -91,39 +87,6 @@ def last(client, name):
         if m == name:
             return a
     return None
-
-
-def test_jog_and_clamp(mod):
-    print("[cartesian jog -> relative stream, clamped]")
-    c = mod.Controller("http://127.0.0.1:8080")
-    cl = c.client
-    # a normal in-range step passes straight through to the endpoint jog
-    c.jog(fwd=0.005, right=-0.003, up=0.001, roll=1.0, yaw=-0.5)
-    args = last(cl, "jog")
-    check("jog fwd passthrough", abs(args[0] - 0.005) < 1e-9)
-    check("jog right passthrough", abs(args[1] + 0.003) < 1e-9)
-    check("jog up passthrough", abs(args[2] - 0.001) < 1e-9)
-    check("jog roll passthrough", abs(args[3] - 1.0) < 1e-9)
-    check("jog yaw passthrough", abs(args[5] + 0.5) < 1e-9)
-
-    # oversized steps are clamped to the per-tick max (smooth velocity cap)
-    c.jog(fwd=0.5, up=-0.9, roll=45.0, pitch=-45.0, yaw=45.0)
-    args = last(cl, "jog")
-    check("fwd clamped to 0.02", abs(args[0] - 0.02) < 1e-9)
-    check("up clamped to -0.02", abs(args[2] + 0.02) < 1e-9)
-    check("roll clamped to 4.0", abs(args[3] - 4.0) < 1e-9)
-    check("pitch clamped to -4.0", abs(args[4] + 4.0) < 1e-9)
-    check("yaw clamped to 4.0", abs(args[5] - 4.0) < 1e-9)
-
-    # no-IK / endpoint failure propagates so the panel can show it
-    def boom(**kw):
-        raise mod.pc.PiperError("IK failed")
-    cl.jog = boom
-    try:
-        c.jog(fwd=0.005)
-        check("jog failure raises", False)
-    except Exception:
-        check("jog failure raises", True)
 
 
 def test_joint_jog(mod):
@@ -184,8 +147,6 @@ def test_http_panel(mod):
         check("GET /api/state ok", st["ok"] and st["state"]["gripper_mm"] == 40.0)
 
         # jog via HTTP (relative, streamed)
-        code, r = _post(port, {"action": "jog", "fwd": 0.005, "roll": 1.0})
-        check("POST jog ok", code == 200 and r["ok"])
         code, r = _post(port, {"action": "joint_jog", "index": 0, "delta": 3})
         check("POST joint_jog ok", code == 200 and r["ok"])
         code, r = _post(port, {"action": "gripper", "position_mm": 10})
@@ -251,7 +212,6 @@ def test_websocket(mod):
 
 def main():
     mod = load_controller()
-    test_jog_and_clamp(mod)
     test_joint_jog(mod)
     test_gripper_and_modes(mod)
     test_http_panel(mod)
