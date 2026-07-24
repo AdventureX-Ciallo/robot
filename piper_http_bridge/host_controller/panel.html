@@ -214,49 +214,45 @@ function flashKey(k){
 }
 
 // ---------- 关节点动（点动=小步微操，按住=连续+提速） ----------
-// 判定很直白:
-//   * 点动 = 收到一个停止(松开/离开)前的单击 -> 只动一小步。
-//   * 按住 = 指针没抬起 -> 定时器持续发;从第 2 拍开始步长按 x3 提速。
-// 键盘(按住会自重复)用"延时未停即续发"来区分单点与按住;触摸/鼠标直接看 start/stop。
+// 判定用浏览器原生"按住即自重复",不自己计时猜:
+//   键盘按住会自动 repeat => repeat 事件即按住,直接提速;
+//   无 repeat 的单次按下   => 点动,只走一小步。
+// 鼠标/触摸没有自重复,但有真实的按下/松开事件:
+//   按下立即一小步;只有"确实按住没松开"时才在 HOLD_MS 后进入连续+提速。
 const JREP_MS=25;      // 按住时的重复率 ~40Hz -> 平滑
-const KB_HOLD_MS=180;  // 键盘:按下超过这个还没松开 => 视为按住
+const HOLD_MS=250;     // 触摸/鼠标按住超过这个时长才进入连续+提速
 const BOOST=3;         // 按住后的步长倍率
-const _jj={i:null, d:0, base:0, count:0, timer:null, stopped:true, kbHold:false};
+const _jj={i:null, d:0, base:0, timer:null};
 
 function _setBoost(on){ const b=$("#boost"+_jj.i); if(b) b.classList.toggle("on",!!on); }
-
 function _fire(){ doCmd({action:"joint_jog", index:_jj.i, delta:_jj.d*_jj.base}); }
-function _tick(){
-  if(_jj.stopped) return;
-  _jj.count++;
-  if(_jj.count>=2){ _jj.base=jointStep(_jj.i)*BOOST; _setBoost(true); }  // 按住 -> 提速
-  _fire();
-}
 
-// 触摸/鼠标:start 明确的按住;end 明确的停止。立即动一小步,持续按住则续发+提速。
-function pressJoint(i,d){
-  _jj.i=i; _jj.d=d; _jj.base=jointStep(i); _jj.count=0;
-  _jj.stopped=false; _jj.kbHold=false;
-  _setBoost(false);
-  _fire();                                            // 立即一小步(点动也只有这一步)
-  if(_jj.timer==null) _jj.timer=setInterval(_tick,JREP_MS);
-}
-function releaseJoint(){ stopJoint(); }
-
-// 键盘:立即一小步;按住会自重复,所以"延时未停"才开始连续+提速。
-function kbJoint(i,d){
-  if(!_jj.stopped && _jj.i===i && _jj.d===d && _jj.kbHold) return;  // 已在按住连发
-  _jj.i=i; _jj.d=d; _jj.base=jointStep(i); _jj.count=0;
-  _jj.stopped=false; _jj.kbHold=true;
-  _setBoost(false);
-  _fire();
-  if(_jj.timer==null) _jj.timer=setInterval(_tick,JREP_MS);
-  const tok=(_jj.kbTok=( _jj.kbTok||0)+1);
-  setTimeout(()=>{ if(_jj.kbTok===tok) _jj.kbHold=false; },KB_HOLD_MS);
-}
+function _timerOn(){ if(_jj.timer==null) _jj.timer=setInterval(()=>{ if(_jj.i!=null) _fire(); },JREP_MS); }
 function stopJoint(){
-  _jj.stopped=true; _jj.count=0;
+  _jj.i=null;
   if(_jj.timer!=null){ clearInterval(_jj.timer); _jj.timer=null; }
+}
+
+// 触摸/鼠标:按下=立即一小步;松开=停。按住不放 -> HOLD_MS 后进入连续+提速。
+function pressJoint(i,d){
+  _jj.i=i; _jj.d=d; _jj.base=jointStep(i);
+  _setBoost(false);
+  _fire();
+  const tok=(_jj.tok=(_jj.tok||0)+1);
+  setTimeout(()=>{ if(_jj.tok===tok && _jj.i===i && _jj.d===d){
+    _jj.base=jointStep(i)*BOOST; _setBoost(true); _timerOn();
+  }}, HOLD_MS);
+}
+function releaseJoint(){ _jj.tok=(_jj.tok||0)+1; stopJoint(); }
+
+// 键盘:无 repeat 的单次按下=一小步;repeat(系统确认按住)=连续+提速。
+function kbTap(i,d){            // keydown 且 e.repeat=false
+  _jj.i=i; _jj.d=d; _jj.base=jointStep(i);
+  _setBoost(false); _fire();
+}
+function kbHold(i,d){           // keydown 且 e.repeat=true(系统自重复 -> 确定按住)
+  _jj.i=i; _jj.d=d; _jj.base=jointStep(i)*BOOST;
+  _setBoost(true); _fire();
 }
 
 // 键盘 -> 关节/方向(0-based 索引)
@@ -267,22 +263,23 @@ const KEYJ={"1":{i:0,d:-1},"2":{i:0,d:+1},
             "9":{i:4,d:-1},"0":{i:4,d:+1},
             "-":{i:5,d:-1},"=":{i:5,d:+1}};
 
-// 键盘:单点=一小步,按住(自重复)=连续+提速;松开停。不含 Space/Enter。
+// 键盘:点按=一小步;按住(系统自动 repeat)=连续+提速。松开停。不含 Space/Enter。
 const _keyHeld={};
 document.addEventListener("keydown",e=>{
   const k=e.key.toLowerCase();
   if(e.target.tagName==="INPUT") return;      // 不干扰步长/滑条等输入
-  if(e.repeat) return;
-  if(k==="g"){ gripTo(gripActual-gripStep()); flashKey("g"); return; }
-  if(k==="h"){ gripTo(gripActual+gripStep()); flashKey("h"); return; }
+  if(k==="g"||k==="h"){ if(e.repeat) return;
+    gripTo(gripActual+(k==="h"?1:-1)*gripStep()); flashKey(k); return; }
   const spec=KEYJ[k];
-  if(spec){ flashKey(k); _keyHeld[k]=true; kbJoint(spec.i,spec.d); }
+  if(!spec) return;
+  if(e.repeat){ if(_keyHeld[k]) kbHold(spec.i,spec.d); }   // 系统确认按住 -> 提速
+  else { flashKey(k); _keyHeld[k]=true; kbTap(spec.i,spec.d); }
 });
 document.addEventListener("keyup",e=>{
   const k=e.key.toLowerCase();
   if(KEYJ[k]){ delete _keyHeld[k];
     const still=Object.keys(_keyHeld).filter(x=>KEYJ[x]);
-    if(still.length){ const s=KEYJ[still[still.length-1]]; kbJoint(s.i,s.d); }
+    if(still.length){ const s=KEYJ[still[still.length-1]]; kbTap(s.i,s.d); }
     else stopJoint();
   }
 });
