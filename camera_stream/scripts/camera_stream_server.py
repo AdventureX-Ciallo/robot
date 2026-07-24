@@ -68,12 +68,17 @@ VIEWER_HTML = """<!doctype html>
   main{height:calc(100% - 49px);display:flex;align-items:center;justify-content:center}
   img{max-width:100%;max-height:100%;object-fit:contain;background:#000}
   #msg{position:fixed;left:1rem;bottom:.8rem;font-size:.8rem;color:#8b98a9}
+  #rtc{position:fixed;right:1rem;bottom:.8rem;font-size:.85rem}
+  #rtc a{color:#7db4ff;text-decoration:none;border:1px solid #2e3947;
+    padding:.3rem .7rem;border-radius:6px;background:#11161d}
+  #rtc a:hover{border-color:#1f6feb}
 </style>
 </head>
 <body>
 <header><h1>camera_stream</h1><span id="info"></span></header>
 <main><img id="v" src="__STREAM__" alt="live stream"></main>
 <div id="msg">connecting...</div>
+<div id="rtc" style="display:none"><a id="rtcLink" target="_blank" rel="noopener">⚡ 低延迟 WebRTC</a></div>
 <script>
 var img = document.getElementById('v'), msg = document.getElementById('msg');
 function ok(on){ msg.textContent = on ? 'live' : 'reconnecting...'; }
@@ -85,6 +90,12 @@ fetch('__STATE__').then(function(r){return r.json();}).then(function(s){
   if (s && s.stream) document.getElementById('info').textContent =
     s.device + '  ' + (s.requested_width||'?') + 'x' + (s.requested_height||'?') +
     ' @ ' + (s.requested_fps||'?') + 'fps';
+  var w = s && s.webrtc;
+  if (w && w.configured && w.page_url) {
+    var a = document.getElementById('rtcLink');
+    a.href = w.page_url;
+    document.getElementById('rtc').style.display = 'block';
+  }
 }).catch(function(){});
 </script>
 </body>
@@ -139,6 +150,24 @@ def first_video_stream(probe):
     return {}
 
 
+_HW_H264 = None  # cached result of _hw_h264_available()
+
+
+def _hw_h264_available():
+    """True if ffmpeg was built with a V4L2 mem2mem H.264 encoder (the VPU on
+    RK3566/RK3588 etc.). Probed once by listing encoders, then cached."""
+    global _HW_H264
+    if _HW_H264 is not None:
+        return _HW_H264
+    try:
+        out = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
+                             capture_output=True, text=True, timeout=10).stdout
+        _HW_H264 = "h264_v4l2m2m" in out
+    except Exception:
+        _HW_H264 = False
+    return _HW_H264
+
+
 class CameraBackend(object):
     """Owns the ffmpeg capture pipe and fans the latest JPEG out to clients.
 
@@ -150,21 +179,27 @@ class CameraBackend(object):
     """
 
     def __init__(self, device="/dev/video0", width=1280, height=720, fps=30,
-                 quality=5, input_format="auto", extra_input=None):
+                 quality=5, input_format="auto", extra_input=None,
+                 h264_args=None, rtsp_url="", rtsp_transport="tcp"):
         self.device = device
         self.width = int(width)
         self.height = int(height)
         self.fps = int(fps)
         # mjpeg -q:v: 2 (best) .. 31 (worst); clamp to a sane band.
         self.quality = max(2, min(31, int(quality)))
-        self.input_format = (input_format or "auto").lower()  # auto|mjpeg|yuyv
+        self.input_format = (input_format or "auto").lower()  # auto|mjpeg|yuyv|h264
         self.extra_input = list(extra_input or [])
+        # Optional low-latency path: raw H.264 -> MediaMTX (RTSP) -> WebRTC.
+        self.h264_args = list(h264_args or [])
+        self.rtsp_url = rtsp_url
+        self.rtsp_transport = (rtsp_transport or "tcp").lower()
 
         self._cond = threading.Condition()
         self._frame = None            # newest complete JPEG (bytes)
         self._seq = 0                 # increments once per published frame
         self._lock = threading.Lock()
         self._proc = None
+        self._h264_proc = None
         self._stop = False
         self._stop_event = threading.Event()
         self.start_ts = time.time()
@@ -174,40 +209,103 @@ class CameraBackend(object):
         self.last_error = None
         self.probe = None             # ffprobe info, filled on first frame
         self._thread = None
+        self._h264_thread = None
 
     # ------------------------------------------------------------------ cmd
     def _build_cmd(self):
+        # -fflags/-flags low_delay + nobuffer shave ffmpeg's own demux/decode
+        # buffering, which is otherwise the biggest hidden source of lag.
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error",
+               "-fflags", "nobuffer", "-flags", "low_delay",
                "-f", "v4l2"]
+        passthrough = False
         if self.input_format in ("mjpeg", "yuyv", "yuyv422"):
+            cmd += ["-input_format", "mjpeg" if self.input_format == "mjpeg"
+                    else "yuyv422"]
+            passthrough = self.input_format == "mjpeg"
+        cmd += ["-video_size", "%dx%d" % (self.width, self.height),
+                "-framerate", str(self.fps)]
+        cmd += self.extra_input
+        cmd += ["-i", self.device,
+                "-an"]                         # no audio
+        if passthrough:
+            # Camera already emits MJPEG: copy it straight through. Zero
+            # decode/re-encode -> lowest possible CPU and latency on the Pi.
+            cmd += ["-c:v", "copy"]
+        else:
+            cmd += ["-c:v", "mjpeg",
+                    "-q:v", str(self.quality)]
+        cmd += ["-f", "mpjpeg", "-"]           # MJPEG to stdout
+        return cmd
+
+    def _build_h264_cmd(self):
+        """ffmpeg pipeline that pushes raw H.264 to MediaMTX over RTSP.
+
+        MediaMTX then serves that to browsers as WebRTC (sub-second). This
+        runs alongside the MJPEG pipe: the MJPEG pipe still feeds /stream,
+        /snapshot and /state, this one only feeds the low-latency WebRTC path.
+        Returns None when no RTSP target is configured.
+        """
+        if not self.rtsp_url:
+            return None
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error",
+               "-fflags", "nobuffer", "-flags", "low_delay",
+               "-f", "v4l2"]
+        native = self.input_format == "h264"
+        if native:
+            cmd += ["-input_format", "h264"]   # camera emits H.264 directly
+        elif self.input_format in ("mjpeg", "yuyv", "yuyv422"):
             cmd += ["-input_format", "mjpeg" if self.input_format == "mjpeg"
                     else "yuyv422"]
         cmd += ["-video_size", "%dx%d" % (self.width, self.height),
                 "-framerate", str(self.fps)]
         cmd += self.extra_input
-        cmd += ["-i", self.device,
-                "-an",                       # no audio
-                "-c:v", "mjpeg",
-                "-q:v", str(self.quality),
-                "-f", "mpjpeg", "-"]         # MJPEG to stdout
+        cmd += ["-i", self.device, "-an"]
+        if native:
+            cmd += ["-c:v", "copy"]            # zero re-encode: lowest latency
+        else:
+            # Transcode to H.264 for WebRTC. Preference order:
+            #   1) explicit --h264-enc-arg override,
+            #   2) hardware VPU encoder (h264_v4l2m2m on RK3566 etc.) if present,
+            #   3) software x264 tuned for realtime low-latency.
+            if self.h264_args:
+                cmd += self.h264_args
+            elif _hw_h264_available():
+                cmd += ["-c:v", "h264_v4l2m2m", "-pix_fmt", "yuv420p",
+                        "-g", str(max(1, self.fps)),
+                        "-b:v", "4M", "-num_output_buffers", "32",
+                        "-num_capture_buffers", "32"]
+            else:
+                cmd += ["-c:v", "libx264", "-preset", "ultrafast",
+                        "-tune", "zerolatency", "-pix_fmt", "yuv420p",
+                        "-g", str(max(1, self.fps)),
+                        "-b:v", "2M", "-maxrate", "2M", "-bufsize", "4M"]
+        cmd += ["-bsf:v", "h264_mp4toannexb",   # WebRTC wants Annex B
+                "-f", "rtsp", "-rtsp_transport", self.rtsp_transport,
+                self.rtsp_url]
         return cmd
 
     # ------------------------------------------------------------- lifecycle
     def start(self):
-        """Start the capture thread (idempotent)."""
+        """Start the capture thread(s) (idempotent)."""
         with self._lock:
-            if self._thread and self._thread.is_alive():
-                return
             self._stop = False
             self._stop_event.clear()
-            self._thread = threading.Thread(target=self._run, daemon=True)
-            self._thread.start()
+            if not (self._thread and self._thread.is_alive()):
+                self._thread = threading.Thread(target=self._run, daemon=True)
+                self._thread.start()
+            if self.rtsp_url and not (self._h264_thread
+                                      and self._h264_thread.is_alive()):
+                self._h264_thread = threading.Thread(target=self._run_h264,
+                                                     daemon=True)
+                self._h264_thread.start()
 
     def stop(self):
         """Stop capturing and kill any running ffmpeg (idempotent)."""
         self._stop = True
         self._stop_event.set()
         self._kill_proc()
+        self._kill_h264()
         with self._cond:
             self._cond.notify_all()      # wake stream handlers so they can exit
 
@@ -215,6 +313,16 @@ class CameraBackend(object):
         with self._lock:
             p = self._proc
             self._proc = None
+        if p is not None:
+            try:
+                p.kill()
+            except Exception:
+                pass
+
+    def _kill_h264(self):
+        with self._lock:
+            p = self._h264_proc
+            self._h264_proc = None
         if p is not None:
             try:
                 p.kill()
@@ -254,41 +362,83 @@ class CameraBackend(object):
             time.sleep(backoff)
             backoff = min(backoff * 2.0, 30.0)     # 1s -> 2 -> 4 ... cap 30s
 
+    def _run_h264(self):
+        """Watchdog loop that keeps the H.264 -> RTSP push alive.
+
+        The push blocks until ffmpeg exits (MediaMTX not up yet, camera
+        hiccup, unplug), then retries with the same backoff as the MJPEG pipe.
+        No frame parsing here -- MediaMTX/WebRTC own the H.264 path end to end.
+        """
+        backoff = 1.0
+        while not self._stop:
+            cmd = self._build_h264_cmd()
+            if not cmd:
+                return
+            proc = None
+            try:
+                log.info("starting h264 push: %s", " ".join(cmd))
+                proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.PIPE)
+                with self._lock:
+                    self._h264_proc = proc
+                while not self._stop and proc.poll() is None:
+                    time.sleep(0.5)
+            except FileNotFoundError:
+                self.last_error = "ffmpeg not found on PATH (sudo apt install ffmpeg)"
+                log.error(self.last_error)
+                return                           # no point retrying
+            except Exception as e:
+                self.last_error = str(e)
+                log.error("h264 push error: %s", e)
+            finally:
+                self._kill_h264()
+
+            if self._stop:
+                break
+            log.warning("h264 push lost; restarting in %.1fs", backoff)
+            time.sleep(backoff)
+            backoff = min(backoff * 2.0, 30.0)
+
     def _read_frames(self, proc):
         """Stream ffmpeg's mpjpeg stdout and publish each complete JPEG.
 
-        We scan the byte stream for JPEG SOI/EOI markers rather than trusting
-        the multipart boundaries: that emits a frame the instant its EOI
-        arrives, is robust to buffering, and never waits on a trailing
-        boundary line that may sit in a buffer. Reading one byte at a time is
-        cheap on the RK3566 and means we never over-read into the next frame.
+        Read in large chunks (not one byte at a time) and scan each chunk for
+        the JPEG SOI/EOI markers (FF D8 / FF D9). Chunked reads cut the
+        per-byte Python overhead that makes 720p stutter on the RK3566; marker
+        scanning still emits a frame the instant its EOI arrives, so latency
+        stays bounded by capture, not by any buffering.
         """
         out = proc.stdout
         buf = bytearray()
         capturing = False
-        prev = -1
         while not self._stop:
-            b = out.read(1)
-            if not b:
+            chunk = out.read(65536)
+            if not chunk:
                 break                              # ffmpeg exited / pipe closed
-            cur = b[0]
-            if prev == 0xFF:
-                if cur == 0xD8:                    # SOI: start a fresh frame
-                    buf = bytearray(b"\xff\xd8")
-                    capturing = True
-                elif cur == 0xD9 and capturing:    # EOI: frame complete
-                    buf.append(0xD9)
-                    self._publish(bytes(buf))
+            i = 0
+            n = len(chunk)
+            while i < n:
+                b = chunk[i]
+                if b == 0xFF and i + 1 < n:
+                    m = chunk[i + 1]
+                    if m == 0xD8:                  # SOI: start a fresh frame
+                        buf = bytearray(b"\xff\xd8")
+                        capturing = True
+                        i += 2
+                        continue
+                    if m == 0xD9 and capturing:    # EOI: frame complete
+                        buf += b"\xff\xd9"
+                        self._publish(bytes(buf))
+                        buf = bytearray()
+                        capturing = False
+                        i += 2
+                        continue
+                if capturing:
+                    buf.append(b)
+                i += 1
+                if len(buf) > 4 * 1024 * 1024:     # corrupt-stream guard
                     buf = bytearray()
                     capturing = False
-                elif capturing:
-                    buf.append(cur)
-            elif capturing:
-                buf.append(cur)
-            prev = cur
-            if capturing and len(buf) > 4 * 1024 * 1024:   # corrupt-stream guard
-                buf = bytearray()
-                capturing = False
 
     def _publish(self, jpeg):
         with self._cond:
@@ -335,7 +485,20 @@ class CameraBackend(object):
     def state(self):
         with self._lock:
             running = self._proc is not None and self._proc.poll() is None
+            h264_running = (self._h264_proc is not None
+                            and self._h264_proc.poll() is None)
         stream = first_video_stream(self.probe)
+        # Derive MediaMTX's WebRTC viewer URL from the RTSP push target:
+        # rtsp://host:8554/cam  ->  http://host:8889/cam
+        page_url = None
+        if self.rtsp_url:
+            try:
+                rest = self.rtsp_url.split("://", 1)[-1]
+                hostport, _, path = rest.partition("/")
+                host = hostport.rsplit(":", 1)[0]
+                page_url = "http://%s:8889/%s" % (host, path)
+            except Exception:
+                page_url = None
         return {
             "device": self.device,
             "requested_width": self.width,
@@ -347,6 +510,12 @@ class CameraBackend(object):
             "restarts": self.restarts,
             "uptime_s": round(time.time() - self.start_ts, 1),
             "last_error": self.last_error,
+            "webrtc": {                          # low-latency H.264 path
+                "configured": bool(self.rtsp_url),
+                "rtsp_url": self.rtsp_url or None,
+                "page_url": page_url,
+                "pushing": h264_running,
+            },
             "stream": {
                 "codec": stream.get("codec_name"),
                 "width": stream.get("width"),
@@ -486,7 +655,24 @@ def main():
     ap.add_argument("--quality", type=int, default=5,
                     help="JPEG quality 2 (best) .. 31 (worst); default 5")
     ap.add_argument("--input-format", default="auto",
-                    help="v4l2 input format: auto|mjpeg|yuyv (default auto)")
+                    help="v4l2 input format: auto|mjpeg|yuyv|h264 (default auto). "
+                         "'h264' = camera emits H.264 directly (for WebRTC)")
+    ap.add_argument("--extra-input", action="append", default=None,
+                    metavar="ARG",
+                    help="extra raw ffmpeg INPUT arg (repeatable), inserted "
+                         "before -i; e.g. --extra-input -input_format "
+                         "--extra-input h264")
+    ap.add_argument("--rtsp-url", default="",
+                    help="push raw H.264 to this MediaMTX RTSP URL for WebRTC, "
+                         "e.g. rtsp://127.0.0.1:8554/cam (enables low-latency)")
+    ap.add_argument("--rtsp-transport", default="tcp",
+                    help="RTSP transport to MediaMTX: tcp|udp (default tcp)")
+    ap.add_argument("--h264-enc-arg", action="append", default=None,
+                    metavar="ARG",
+                    help="raw ffmpeg OUTPUT arg (repeatable) replacing the "
+                         "default software x264 transcode; use to select a "
+                         "hardware encoder, e.g. --h264-enc-arg -c:v "
+                         "--h264-enc-arg h264_v4l2m2m")
     ap.add_argument("--token", default="", help="bearer token (recommended)")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
@@ -501,7 +687,11 @@ def main():
         raise SystemExit(2)
 
     backend = CameraBackend(device=args.device, width=w, height=h, fps=args.fps,
-                            quality=args.quality, input_format=args.input_format)
+                            quality=args.quality, input_format=args.input_format,
+                            extra_input=args.extra_input,
+                            h264_args=args.h264_enc_arg,
+                            rtsp_url=args.rtsp_url,
+                            rtsp_transport=args.rtsp_transport)
     backend.start()
 
     # Give the capture a moment; warn (don't die) if nothing arrives yet --
@@ -516,6 +706,10 @@ def main():
                     args.device)
     else:
         log.info("capturing %s -> %dx%d @ %dfps", args.device, w, h, args.fps)
+
+    if args.rtsp_url:
+        log.info("WebRTC path: pushing H.264 -> %s (view via MediaMTX :8889)",
+                 args.rtsp_url)
 
     shutdown = serve(backend, host=args.host, port=args.port, token=args.token)
     try:

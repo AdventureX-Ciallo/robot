@@ -19,7 +19,13 @@
 #   --height N        capture height                    (default 720)
 #   --fps N           frame rate                        (default 30)
 #   --quality N       JPEG quality 2 (best) .. 31 (worst) (default 5)
-#   --input-format F  auto|mjpeg|yuyv                   (default auto)
+#   --input-format F  auto|mjpeg|yuyv|h264              (default auto)
+#                     'h264' = camera emits H.264 (needed for WebRTC)
+#   --webrtc          enable low-latency WebRTC: install MediaMTX and push
+#                     H.264 to it (--rtsp-url defaults to rtsp://127.0.0.1:8554/cam)
+#   --rtsp-url URL    MediaMTX RTSP target for WebRTC   (implies --webrtc)
+#   --rtsp-transport T  RTSP transport tcp|udp          (default tcp)
+#   --mediamtx        (re)install the MediaMTX WebRTC gateway too
 #   --token SECRET    require this bearer token on the stream/viewer
 #   --no-service      install but do not install/start systemd
 #   -h | --help       show this help
@@ -35,6 +41,10 @@ HEIGHT="${HEIGHT:-720}"
 FPS="${FPS:-30}"
 QUALITY="${QUALITY:-5}"
 INPUT_FORMAT="${INPUT_FORMAT:-auto}"
+RTSP_URL="${RTSP_URL:-}"
+RTSP_TRANSPORT="${RTSP_TRANSPORT:-tcp}"
+WEBRTC=0
+MEDIAMTX=0
 TOKEN="${TOKEN:-}"
 INSTALL_SERVICE=1
 
@@ -61,16 +71,27 @@ while [[ $# -gt 0 ]]; do
     --fps)           FPS="$2"; shift 2 ;;
     --quality)       QUALITY="$2"; shift 2 ;;
     --input-format)  INPUT_FORMAT="$2"; shift 2 ;;
+    --webrtc)        WEBRTC=1; shift ;;
+    --rtsp-url)      RTSP_URL="$2"; WEBRTC=1; shift 2 ;;
+    --rtsp-transport) RTSP_TRANSPORT="$2"; shift 2 ;;
+    --mediamtx)      MEDIAMTX=1; WEBRTC=1; shift ;;
     --token)         TOKEN="$2"; shift 2 ;;
     --no-service)    INSTALL_SERVICE=0; shift ;;
-    -h|--help)       sed -n '2,32p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help)       sed -n '2,38p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) die "unknown option: $1 (use --help)" ;;
   esac
 done
 
+# WebRTC needs a push target; default to a local MediaMTX on the standard path.
+if [[ "$WEBRTC" -eq 1 && -z "$RTSP_URL" ]]; then
+  RTSP_URL="rtsp://127.0.0.1:8554/cam"
+  MEDIAMTX=1            # no explicit target -> we must be running MediaMTX
+fi
+
 log "camera_stream installer"
 log "  device : $DEVICE   ${WIDTH}x${HEIGHT} @ ${FPS}fps  q=$QUALITY  in=$INPUT_FORMAT"
 log "  port   : $PORT     token=${TOKEN:+<set>}  view=${VIEW:-<w/h>}"
+[[ "$WEBRTC" -eq 1 ]] && log "  webrtc : ON  -> $RTSP_URL"
 command -v python3 >/dev/null 2>&1 || die "python3 not found."
 
 # ---- 1. dependencies ----------------------------------------------------------
@@ -96,15 +117,28 @@ else
   warn "list cameras later with:  v4l2-ctl --list-devices"
 fi
 
-# ---- 3. systemd service --------------------------------------------------------
+# ---- 3. MediaMTX WebRTC gateway (optional) --------------------------------------
+if [[ "$MEDIAMTX" -eq 1 ]]; then
+  log "[3/4] Installing MediaMTX WebRTC gateway ..."
+  PATH_NAME="$(printf '%s' "$RTSP_URL" | sed -n 's#.*/\([^/]*\)$#\1#p')"
+  PATH_NAME="${PATH_NAME:-cam}"
+  bash "$PKG_SRC/install_mediamtx.sh" --path "$PATH_NAME" \
+    $([[ "$INSTALL_SERVICE" -eq 0 ]] && echo --no-service)
+else
+  log "[3/4] MediaMTX not requested (use --mediamtx or --webrtc to enable)."
+fi
+
+# ---- 4. systemd service --------------------------------------------------------
 VIEW_ARG=""
 [[ -n "$VIEW" ]] && VIEW_ARG="--view $VIEW"
+RTSP_ARGS=""
+[[ "$WEBRTC" -eq 1 ]] && RTSP_ARGS="--rtsp-url $RTSP_URL --rtsp-transport $RTSP_TRANSPORT"
 if [[ "$INSTALL_SERVICE" -eq 1 ]]; then
-  log "[3/3] Installing + starting systemd unit ($SERVICE_NAME) ..."
+  log "[4/4] Installing + starting systemd unit ($SERVICE_NAME) ..."
   UNIT="$(mktemp)"
   cat > "$UNIT" <<UNIT_EOF
 [Unit]
-Description=HTTP MJPEG live-stream daemon for the Orange Pi camera
+Description=HTTP MJPEG + WebRTC live-stream daemon for the Orange Pi camera
 After=network-online.target
 Wants=network-online.target
 
@@ -113,7 +147,7 @@ Type=simple
 # root can always open /dev/video*; switch to a video-group user if you prefer.
 User=root
 Group=root
-ExecStart=/usr/bin/python3 $PKG_SRC/scripts/camera_stream_server.py --device $DEVICE --host 0.0.0.0 --port $PORT --width $WIDTH --height $HEIGHT --fps $FPS --quality $QUALITY --input-format $INPUT_FORMAT $VIEW_ARG ${TOKEN:+--token $TOKEN}
+ExecStart=/usr/bin/python3 $PKG_SRC/scripts/camera_stream_server.py --device $DEVICE --host 0.0.0.0 --port $PORT --width $WIDTH --height $HEIGHT --fps $FPS --quality $QUALITY --input-format $INPUT_FORMAT $VIEW_ARG $RTSP_ARGS ${TOKEN:+--token $TOKEN}
 Restart=on-failure
 RestartSec=3
 TimeoutStartSec=30
@@ -133,17 +167,24 @@ UNIT_EOF
     warn "$SERVICE_NAME not active yet -- inspect: journalctl -u $SERVICE_NAME -n 80 --no-pager"
   fi
 else
-  log "[3/3] Skipping systemd install (--no-service)."
-  log "Run manually: python3 $PKG_SRC/scripts/camera_stream_server.py --device $DEVICE --port $PORT ${TOKEN:+--token $TOKEN}"
+  log "[4/4] Skipping systemd install (--no-service)."
+  log "Run manually: python3 $PKG_SRC/scripts/camera_stream_server.py --device $DEVICE --port $PORT $RTSP_ARGS ${TOKEN:+--token $TOKEN}"
 fi
 
 # ---- summary ------------------------------------------------------------------
 IP_ADDR="$(hostname -I 2>/dev/null | awk '{print $1}')"; IP_ADDR="${IP_ADDR:-<orangepi-ip>}"
+if [[ "$WEBRTC" -eq 1 ]]; then
+  RTC_PATH="$(printf '%s' "$RTSP_URL" | sed -n 's#.*/\([^/]*\)$#\1#p')"; RTC_PATH="${RTC_PATH:-cam}"
+  RTC_LINE="  WebRTC : http://$IP_ADDR:8889/$RTC_PATH   (sub-second; embed in the panel)"
+else
+  RTC_LINE="  WebRTC : off (re-run with --webrtc to enable sub-second streaming)"
+fi
 cat <<EOF
 
 $(printf '\033[1;32m')================ install complete ================$(printf '\033[0m')
   Device : $DEVICE   ${WIDTH}x${HEIGHT} @ ${FPS}fps
-  Viewer : http://$IP_ADDR:$PORT/          (open in any browser)
+$RTC_LINE
+  Viewer : http://$IP_ADDR:$PORT/          (MJPEG fallback, in any browser)
   Stream : http://$IP_ADDR:$PORT/stream    (MJPEG; use as an <img> src / in VLC)
   Snap   : http://$IP_ADDR:$PORT/snapshot  (single JPEG)
   State  : http://$IP_ADDR:$PORT/state

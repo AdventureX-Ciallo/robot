@@ -63,7 +63,7 @@
   .legend{display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px;color:var(--dim)}
   .legend div{display:flex;align-items:center;gap:6px}
   h3.sub{font-size:11px;color:var(--dim);margin:14px 0 8px;font-weight:600}
-  #cam{width:100%;border-radius:8px;background:#000;aspect-ratio:16/9;object-fit:cover;
+  #cam,#camRtc{width:100%;border-radius:8px;background:#000;aspect-ratio:16/9;object-fit:cover;
        border:1px solid var(--line)}
   input[type=range]{width:100%;accent-color:var(--acc2);cursor:pointer}
   .flash{outline:2px solid var(--acc);outline-offset:1px}
@@ -88,25 +88,25 @@
   <!-- 左:笛卡尔点动 + 夹爪 -->
   <div>
     <div class="card">
-      <h2>末端点动（按住连续，松开停止）</h2>
-      <h3 class="sub">平移</h3>
+      <h2>末端点动（相对朝向 · 按住连续，松开停止）</h2>
+      <h3 class="sub">平移（随末端朝向）</h3>
       <div class="pad">
-        <span></span><button data-jog="dx:+1"><span class="kbd">W</span><span class="lbl">前 +X</span></button><span></span>
-        <button data-jog="dy:+1"><span class="kbd">A</span><span class="lbl">左 +Y</span></button>
-        <button data-jog="dx:-1"><span class="kbd">S</span><span class="lbl">后 −X</span></button>
-        <button data-jog="dy:-1"><span class="kbd">D</span><span class="lbl">右 −Y</span></button>
-        <button data-jog="dz:+1"><span class="kbd">Q</span><span class="lbl">上 +Z</span></button>
+        <span></span><button data-jog="fwd:+1"><span class="kbd">W</span><span class="lbl">前</span></button><span></span>
+        <button data-jog="right:+1"><span class="kbd">A</span><span class="lbl">左</span></button>
+        <button data-jog="fwd:-1"><span class="kbd">S</span><span class="lbl">后</span></button>
+        <button data-jog="right:-1"><span class="kbd">D</span><span class="lbl">右</span></button>
+        <button data-jog="up:+1"><span class="kbd">Q</span><span class="lbl">上</span></button>
         <span></span>
-        <button data-jog="dz:-1"><span class="kbd">E</span><span class="lbl">下 −Z</span></button>
+        <button data-jog="up:-1"><span class="kbd">E</span><span class="lbl">下</span></button>
       </div>
-      <h3 class="sub">旋转</h3>
+      <h3 class="sub">旋转（滚转绕工具光轴）</h3>
       <div class="pad">
-        <button data-jog="droll:+1"><span class="kbd">X</span><span class="lbl">滚转 +</span></button>
-        <button data-jog="dpitch:+1"><span class="kbd">C</span><span class="lbl">俯仰 +</span></button>
-        <button data-jog="dyaw:+1"><span class="kbd">R</span><span class="lbl">偏航 +</span></button>
-        <button data-jog="droll:-1"><span class="kbd">Z</span><span class="lbl">滚转 −</span></button>
-        <button data-jog="dpitch:-1"><span class="kbd">V</span><span class="lbl">俯仰 −</span></button>
-        <button data-jog="dyaw:-1"><span class="kbd">F</span><span class="lbl">偏航 −</span></button>
+        <button data-jog="roll:+1"><span class="kbd">X</span><span class="lbl">滚转 +</span></button>
+        <button data-jog="pitch:+1"><span class="kbd">C</span><span class="lbl">俯仰 +</span></button>
+        <button data-jog="yaw:+1"><span class="kbd">R</span><span class="lbl">偏航 +</span></button>
+        <button data-jog="roll:-1"><span class="kbd">Z</span><span class="lbl">滚转 −</span></button>
+        <button data-jog="pitch:-1"><span class="kbd">V</span><span class="lbl">俯仰 −</span></button>
+        <button data-jog="yaw:-1"><span class="kbd">F</span><span class="lbl">偏航 −</span></button>
       </div>
     </div>
 
@@ -121,8 +121,12 @@
     </div>
 
     <div class="card" id="camCard" style="display:none">
-      <h2>摄像头</h2>
+      <h2>摄像头 <span id="camMode" class="muted" style="text-transform:none"></span></h2>
+      <video id="camRtc" autoplay muted playsinline style="display:none"></video>
       <img id="cam" alt="camera stream">
+      <div class="muted" style="margin-top:6px">
+        <a id="camOpen" href="#" target="_blank" rel="noopener" style="color:#7db4ff">新窗口打开</a>
+      </div>
     </div>
   </div>
 
@@ -159,7 +163,7 @@
         <div><span class="kbd">G</span> 合抓</div>
         <div><span class="kbd">H</span> 放开</div>
       </div>
-      <p class="muted" style="margin-top:10px">提示：按住按键/按钮可连续点动，松开即停。</p>
+      <p class="muted" style="margin-top:10px">提示：按住按键/按钮可连续点动，松开即停。前后左右随末端朝向变化，滚转绕工具自身光轴。</p>
     </div>
   </div>
 </div>
@@ -170,9 +174,12 @@
 "use strict";
 const $ = s => document.querySelector(s);
 const CAMERA_URL = "__CAMERA_URL__";
+const CAMERA_RTC_URL = "__CAMERA_WEBRTC_URL__";
 let stepSize = "M";
-const TRANS = {S:0.005, M:0.02, L:0.05};
-const ROT   = {S:2, M:5, L:15};
+// 连续点动:每个 tick 的增量(m / deg);重复率 ~40Hz -> 平滑
+const TICK_MS = 25;
+const TRANS = {S:0.002, M:0.005, L:0.012};   // 每 tick 平移 (m)  -> 0.08/0.2/0.48 m/s
+const ROT   = {S:0.4, M:1.0, L:2.4};          // 每 tick 旋转 (deg)-> 16/40/96 deg/s
 const JSTEP = {S:1, M:3, L:10};
 const GRIP  = {S:2, M:10, L:40};
 
@@ -215,48 +222,66 @@ function flashKey(k){
   if(btn) flash(btn);
 }
 
-// ---------- 笛卡尔点动 ----------
+// ---------- 笛卡尔点动（相对朝向，平滑流式） ----------
+// spec 的键: fwd/right/up(m)  roll/pitch/yaw(deg)，值为方向 ±1
 function scaled(spec){
   const d={action:"jog"};
   for(const k in spec){ const v=spec[k];
-    d[k]= (k==="dx"||k==="dy"||k==="dz") ? v*TRANS[stepSize] : v*ROT[stepSize]; }
+    d[k]= (k==="fwd"||k==="right"||k==="up") ? v*TRANS[stepSize] : v*ROT[stepSize]; }
   return d;
 }
-// 连续点动:按下开始循环发送,松开停止
-const jogTimers={};
-function startJog(spec){ stopJogKey(spec); const d=scaled(spec); doCmd(d);
-  jogTimers[JSON.stringify(spec)]=setInterval(()=>doCmd(scaled(spec)),110); }
-function stopJogKey(spec){ const id=jogTimers[JSON.stringify(spec)];
-  if(id){ clearInterval(id); delete jogTimers[JSON.stringify(spec)]; } }
+// fire-and-forget 队列:按住时按 ~40Hz 连续发，不等待每个响应(否则一顿一顿)
+const _jog={active:null, timer:null, inFlight:false, pending:false};
+function _tick(){
+  if(!_jog.active) return;
+  if(_jog.inFlight){ _jog.pending=true; return; }
+  _jog.inFlight=true; _jog.pending=false;
+  doCmd(scaled(_jog.active)).finally(()=>{
+    _jog.inFlight=false;
+    if(_jog.pending){ _jog.pending=false; setTimeout(_tick,0); }
+  });
+}
+function startJog(spec){
+  const same=_jog.active && JSON.stringify(_jog.active)===JSON.stringify(spec);
+  _jog.active=spec;
+  if(_jog.timer==null){ _jog.timer=setInterval(_tick,TICK_MS); }
+  if(!same) _tick();
+}
+function stopJog(){ _jog.active=null;
+  if(_jog.timer!=null){ clearInterval(_jog.timer); _jog.timer=null; } }
 
-const JOGMAP={w:{dx:+1},s:{dx:-1},a:{dy:+1},d:{dy:-1},q:{dz:+1},e:{dz:-1},
-              x:{droll:+1},z:{droll:-1},c:{dpitch:+1},v:{dpitch:-1},r:{dyaw:+1},f:{dyaw:-1}};
+const JOGMAP={w:{fwd:+1},s:{fwd:-1},a:{right:+1},d:{right:-1},q:{up:+1},e:{up:-1},
+              x:{roll:+1},z:{roll:-1},c:{pitch:+1},v:{pitch:-1},r:{yaw:+1},f:{yaw:-1}};
 
 // 按钮(鼠标/触屏)按住连续
 document.querySelectorAll("[data-jog]").forEach(b=>{
   const [axis,sign]=b.dataset.jog.split(":");
   const spec={[axis]:Number(sign)};
   const start=e=>{e.preventDefault(); startJog(spec); flash(b);};
-  const stop=()=>stopJogKey(spec);
+  const stop=()=>stopJog();
   b.addEventListener("mousedown",start); b.addEventListener("touchstart",start,{passive:false});
   b.addEventListener("mouseup",stop); b.addEventListener("mouseleave",stop);
   b.addEventListener("touchend",stop);
 });
 
 // 键盘:按住连续,松开停止;不含 Space/Enter(避免与 Tab/按钮冲突)
+const _keyHeld={};
 document.addEventListener("keydown",e=>{
   const k=e.key.toLowerCase();
   if(e.target.tagName==="INPUT") return;      // 不干扰滑条等输入
   if(e.repeat) return;
   if(k==="g"){ gripTo(gripActual-GRIP[stepSize]); flashKey("g"); return; }
   if(k==="h"){ gripTo(gripActual+GRIP[stepSize]); flashKey("h"); return; }
-  if(JOGMAP[k]){ flashKey(k); startJog(JOGMAP[k]); }
+  if(JOGMAP[k]){ flashKey(k); _keyHeld[k]=true; startJog(JOGMAP[k]); }
 });
 document.addEventListener("keyup",e=>{
   const k=e.key.toLowerCase();
-  if(JOGMAP[k]) stopJogKey(JOGMAP[k]);
+  if(JOGMAP[k]){ delete _keyHeld[k];
+    const still=Object.keys(_keyHeld).filter(x=>JOGMAP[x]);
+    if(still.length) startJog(JOGMAP[still[still.length-1]]); else stopJog();
+  }
 });
-window.addEventListener("blur",()=>{ for(const s in jogTimers){clearInterval(jogTimers[s]);delete jogTimers[s];} });
+window.addEventListener("blur",()=>{ for(const k in _keyHeld) delete _keyHeld[k]; stopJog(); });
 
 // ---------- 夹爪 ----------
 function gripTo(mm){
@@ -317,7 +342,59 @@ $("#stepSeg").querySelectorAll("button").forEach(b=>{
 });
 
 // ---------- 摄像头 ----------
-if(CAMERA_URL){ $("#camCard").style.display="block"; $("#cam").src=CAMERA_URL; }
+// 低延迟首选 WebRTC(MediaMTX WHEP);未配置则用 MJPEG <img> 兜底。
+(function initCam(){
+  const card=$("#camCard"), img=$("#cam"), vid=$("#camRtc"),
+        mode=$("#camMode"), open=$("#camOpen");
+  if(!CAMERA_RTC_URL && !CAMERA_URL){ return; }        // 都没配 -> 隐藏卡片
+  card.style.display="block";
+
+  if(CAMERA_RTC_URL){
+    // MediaMTX 把每个流的 WHEP 端点暴露在 /{path}/whep
+    open.href = CAMERA_RTC_URL;
+    startWhep(CAMERA_RTC_URL.replace(/\/+$/,"") + "/whep", vid, img, mode);
+  }else{
+    mode.textContent = "MJPEG";
+    img.style.display="block"; vid.style.display="none";
+    img.src = CAMERA_URL; open.href = CAMERA_URL;
+  }
+
+  async function startWhep(whepUrl, video, imgEl, modeEl){
+    const pc = new RTCPeerConnection();
+    pc.addTransceiver("video", {direction:"recvonly"});
+    pc.addTransceiver("audio", {direction:"recvonly"});
+    pc.ontrack = e => { video.srcObject = e.streams[0]; };
+    pc.onconnectionstatechange = () => {
+      const s = pc.connectionState;
+      modeEl.textContent = "WebRTC · " + s;
+      if(s==="failed" || s==="closed"){ fallback("WebRTC 断开"); }
+    };
+    try{
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      const res = await fetch(whepUrl, {method:"POST",
+        headers:{"Content-Type":"application/sdp"},
+        body: offer.sdp});
+      if(!res.ok) throw new Error("WHEP " + res.status);
+      await pc.setRemoteDescription({type:"answer", sdp: await res.text()});
+      video.style.display="block"; imgEl.style.display="none";
+      modeEl.textContent = "WebRTC · 低延迟";
+    }catch(err){
+      console.warn("WebRTC failed:", err);
+      fallback("WebRTC 不可用");
+    }
+    function fallback(reason){
+      try{ pc.close(); }catch(e){}
+      if(CAMERA_URL){                      // 回退到 MJPEG
+        modeEl.textContent = "MJPEG · 已回退(" + reason + ")";
+        video.style.display="none"; imgEl.style.display="block";
+        imgEl.src = CAMERA_URL; open.href = CAMERA_URL;
+      }else{
+        modeEl.textContent = reason;
+      }
+    }
+  }
+})();
 
 // ---------- 状态:WebSocket 推送(丝滑) + HTTP 轮询回退 ----------
 function fmt(v,d=2){ return (v===null||v===undefined)?"—":Number(v).toFixed(d); }

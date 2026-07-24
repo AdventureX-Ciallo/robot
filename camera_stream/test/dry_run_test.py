@@ -204,6 +204,68 @@ def test_capture_and_broadcast(mod):
         restore()
 
 
+def test_h264_commands(mod):
+    print("[h264 low-latency command building]")
+    restore = install_fakes(mod)
+    try:
+        # No RTSP target -> no H.264 pipe at all.
+        b = mod.CameraBackend(device="/dev/video0")
+        check("no rtsp -> no h264 cmd", b._build_h264_cmd() is None)
+
+        # Native camera H.264 -> pure passthrough (copy), no re-encode.
+        b = mod.CameraBackend(device="/dev/video0", input_format="h264",
+                              rtsp_url="rtsp://127.0.0.1:8554/cam")
+        cmd = b._build_h264_cmd()
+        check("native h264 passthrough", cmd is not None
+              and "-c:v" in cmd and cmd[cmd.index("-c:v") + 1] == "copy")
+        check("native h264 input_format", "-input_format" in cmd
+              and cmd[cmd.index("-input_format") + 1] == "h264")
+        check("annexb bitstream filter", "h264_mp4toannexb" in cmd)
+        check("rtsp target present", cmd[-1] == "rtsp://127.0.0.1:8554/cam")
+        st = b.state()
+        check("webrtc state configured", st["webrtc"]["configured"] is True)
+        check("webrtc page_url derived",
+              st["webrtc"]["page_url"] == "http://127.0.0.1:8889/cam")
+
+        # MJPEG camera, no HW encoder -> software x264 for WebRTC.
+        mod._HW_H264 = False
+        b = mod.CameraBackend(device="/dev/video0", input_format="mjpeg",
+                              fps=30, rtsp_url="rtsp://127.0.0.1:8554/cam")
+        cmd = b._build_h264_cmd()
+        check("mjpeg transcodes to x264", "libx264" in cmd
+              and "zerolatency" in cmd and cmd[cmd.index("-c:v") + 1] == "libx264")
+
+        # MJPEG camera with a VPU available -> prefer the hardware encoder.
+        mod._HW_H264 = True
+        b = mod.CameraBackend(device="/dev/video0", input_format="mjpeg",
+                              fps=30, rtsp_url="rtsp://127.0.0.1:8554/cam")
+        cmd = b._build_h264_cmd()
+        check("mjpeg prefers hw v4l2m2m", "h264_v4l2m2m" in cmd
+              and "libx264" not in cmd)
+        mod._HW_H264 = None     # reset cache
+
+        # A user-supplied hardware encoder overrides the software default.
+        b = mod.CameraBackend(device="/dev/video0", input_format="mjpeg",
+                              h264_args=["-c:v", "h264_v4l2m2m", "-b:v", "4M"],
+                              rtsp_url="rtsp://127.0.0.1:8554/cam")
+        cmd = b._build_h264_cmd()
+        check("hw encoder override", "h264_v4l2m2m" in cmd
+              and "libx264" not in cmd)
+
+        # h264 thread starts and stops cleanly alongside the MJPEG pipe.
+        b = mod.CameraBackend(device="/dev/video0", input_format="h264",
+                              rtsp_url="rtsp://127.0.0.1:8554/cam")
+        b.start()
+        try:
+            check("h264 thread running", b._h264_thread is not None
+                  and b._h264_thread.is_alive())
+        finally:
+            b.stop()
+        check("h264 stop is clean", True)
+    finally:
+        restore()
+
+
 def _http(port, path, token=""):
     url = "http://127.0.0.1:%d%s" % (port, path)
     headers = {}
@@ -305,6 +367,7 @@ def main():
     test_resolution(mod)
     test_jpeg_extract(mod)
     test_capture_and_broadcast(mod)
+    test_h264_commands(mod)
     test_http(mod)
     print("\n=================================")
     print("passed: %d   failed: %d" % (len(PASSED), len(FAILED)))

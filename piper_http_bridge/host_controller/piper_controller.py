@@ -108,21 +108,21 @@ class Controller(object):
         lo, hi = self.limits[axis]
         return max(lo, min(hi, v))
 
-    # ---- Cartesian jog -------------------------------------------------
-    def jog(self, dx=0.0, dy=0.0, dz=0.0, droll=0.0, dpitch=0.0, dyaw=0.0):
-        with self._lock:
-            x, y, z, r, p, yw = self._cur_pose()
-            x = self._clamp("x", x + dx)
-            y = self._clamp("y", y + dy)
-            z = self._clamp("z", z + dz)
-            r += droll
-            p += dpitch
-            yw += dyaw
-            res = self.client.pose_ctrl(x * 1000.0, y * 1000.0, z * 1000.0,
-                                        r, p, yw)
-        return {"ok": True, "pose": {"x": round(x, 4), "y": round(y, 4),
-                                     "z": round(z, 4), "roll": round(r, 2),
-                                     "pitch": round(p, 2), "yaw": round(yw, 2)}}
+    # ---- Cartesian jog (heading-relative, smoothed) ---------------------
+    def jog(self, fwd=0.0, right=0.0, up=0.0, roll=0.0, pitch=0.0, yaw=0.0):
+        """One smooth jog step, streamed to the endpoint's `jog` action.
+
+        fwd/right/up in metres, roll/pitch/yaw in degrees (already scaled by
+        the caller to a per-tick increment). Steps are clamped small and the
+        server integrates them, so holding a key produces continuous motion.
+        """
+        fwd = max(-0.02, min(0.02, float(fwd)))
+        right = max(-0.02, min(0.02, float(right)))
+        up = max(-0.02, min(0.02, float(up)))
+        roll = max(-4.0, min(4.0, float(roll)))
+        pitch = max(-4.0, min(4.0, float(pitch)))
+        yaw = max(-4.0, min(4.0, float(yaw)))
+        return self.client.jog(fwd, right, up, roll, pitch, yaw)
 
     # ---- joint jog -----------------------------------------------------
     def joint_jog(self, index, delta_deg):
@@ -360,8 +360,13 @@ def make_handler(ctrl, panel_html, hub=None):
         def _dispatch(self, p):
             a = p.get("action")
             if a == "jog":
-                return ctrl.jog(p.get("dx", 0), p.get("dy", 0), p.get("dz", 0),
-                                p.get("droll", 0), p.get("dpitch", 0), p.get("dyaw", 0))
+                try:
+                    return ctrl.jog(p.get("fwd", 0), p.get("right", 0),
+                                    p.get("up", 0), p.get("roll", 0),
+                                    p.get("pitch", 0), p.get("yaw", 0))
+                except Exception as e:
+                    # IK/endpoint failure -> don't crash; tell the panel
+                    return {"ok": False, "error": str(e)}
             if a == "joint_jog":
                 return ctrl.joint_jog(p.get("index", 0), p.get("delta", 0))
             if a == "gripper":
@@ -390,6 +395,10 @@ def main():
     ap.add_argument("--camera", default="",
                     help="MJPEG camera stream URL shown in the panel "
                          "(e.g. http://<orangepi>:8090/stream.mjpeg)")
+    ap.add_argument("--camera-webrtc", default="",
+                    help="MediaMTX WebRTC path URL for sub-second live view "
+                         "(e.g. http://<orangepi>:8889/cam). When set, the "
+                         "panel streams video over WebRTC instead of MJPEG.")
     ap.add_argument("--ws-rate", type=float, default=10.0,
                     help="WebSocket state push rate in Hz (default 10)")
     args = ap.parse_args()
@@ -397,8 +406,9 @@ def main():
     panel_path = os.path.join(HERE, "panel.html")
     with open(panel_path, "r", encoding="utf-8") as f:
         panel_html = f.read()
-    # inject the camera stream URL (empty string hides the camera card)
+    # inject the camera URLs (both empty hides the camera card)
     panel_html = panel_html.replace("__CAMERA_URL__", args.camera)
+    panel_html = panel_html.replace("__CAMERA_WEBRTC_URL__", args.camera_webrtc)
 
     ctrl = Controller(args.endpoint, token=args.token, speed=args.speed)
     hub = WSHub(ctrl, hz=args.ws_rate)
@@ -409,8 +419,10 @@ def main():
     print("  endpoint : %s" % args.endpoint)
     print("  panel    : http://%s:%d/  (state pushed over WebSocket @ %.0f Hz)"
           % (args.host, args.port, args.ws_rate))
-    if args.camera:
-        print("  camera   : %s" % args.camera)
+    if args.camera or args.camera_webrtc:
+        print("  camera   : %s" % (args.camera_webrtc
+                                   and ("%s (WebRTC)" % args.camera_webrtc)
+                                   or args.camera))
     print("  open that URL in a browser, then use WASD/QE/XZ/G/H to drive the arm.")
     try:
         httpd.serve_forever()

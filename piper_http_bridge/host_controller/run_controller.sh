@@ -26,6 +26,7 @@ while [[ $# -gt 0 ]]; do
     --host)     ARGS=(--host "$2" "${ARGS[@]:2}"); shift 2 ;;
     --speed)    ARGS=(--speed "$2" "${ARGS[@]:2}"); shift 2 ;;
     --camera)   ARGS+=(--camera "$2"); shift 2 ;;
+    --camera-webrtc) ARGS+=(--camera-webrtc "$2"); shift 2 ;;
     --ws-rate)  ARGS+=(--ws-rate "$2"); shift 2 ;;
     -h|--help)  sed -n '2,10p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;

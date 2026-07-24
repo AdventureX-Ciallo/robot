@@ -13,6 +13,8 @@
 #   --host IP        panel listen host           (default 0.0.0.0)
 #   --speed N        joint jog speed %%          (default 30)
 #   --camera URL     MJPEG camera stream shown in the panel (optional)
+#   --camera-webrtc URL  MediaMTX WebRTC path for sub-second video (optional;
+#                        takes precedence over --camera in the panel)
 #   --ws-rate N      WebSocket state push rate Hz  (default 10)
 #   --prefix DIR     install location            (default /opt/piper_controller)
 #   --no-service     install files but do not install/start systemd
@@ -26,6 +28,7 @@ PORT="${PORT:-8000}"
 HOST="${HOST:-0.0.0.0}"
 SPEED="${SPEED:-30}"
 CAMERA="${CAMERA:-}"
+CAMERA_RTC="${CAMERA_RTC:-}"
 WS_RATE="${WS_RATE:-10}"
 PREFIX="${PREFIX:-/opt/piper_controller}"
 INSTALL_SERVICE=1
@@ -49,6 +52,7 @@ while [[ $# -gt 0 ]]; do
     --host)      HOST="$2"; shift 2 ;;
     --speed)     SPEED="$2"; shift 2 ;;
     --camera)    CAMERA="$2"; shift 2 ;;
+    --camera-webrtc) CAMERA_RTC="$2"; shift 2 ;;
     --ws-rate)   WS_RATE="$2"; shift 2 ;;
     --prefix)    PREFIX="$2"; shift 2 ;;
     --no-service) INSTALL_SERVICE=0; shift ;;
@@ -80,6 +84,7 @@ if [[ "$INSTALL_SERVICE" -eq 1 ]]; then
   [[ -n "$TOKEN" ]] && TOKEN_ARG="--token $TOKEN"
   CAMERA_ARG=""
   [[ -n "$CAMERA" ]] && CAMERA_ARG="--camera $CAMERA"
+  [[ -n "$CAMERA_RTC" ]] && CAMERA_ARG="$CAMERA_ARG --camera-webrtc $CAMERA_RTC"
   UNIT="$(mktemp)"
   cat > "$UNIT" <<UNIT_EOF
 [Unit]

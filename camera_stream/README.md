@@ -115,7 +115,72 @@ curl http://192.168.1.100:8090/snapshot -o frame.jpg
 
 ---
 
-## 三、分辨率预设（`--view`）
+## 三、低延迟直播（WebRTC，亚秒级）
+
+MJPEG 胜在零依赖、是个浏览器就能放，但端到端延迟通常在数百毫秒~1s。
+要**开车级的低延迟**，用 **MediaMTX + WebRTC**：摄像头出 H.264 →
+`camera_stream_server` 把它推给本机 MediaMTX（RTSP）→ MediaMTX 以 WebRTC
+发给浏览器，**亚秒级**，且摄像头原生 H.264 直通时 ARM 上几乎零 CPU（零转码）。
+
+```
+浏览器(WebRTC <video>)                MediaMTX            camera_stream_server
+   ▲  WebRTC :8889 /cam   ┌──────────────┐   RTSP :8554   (ffmpeg 推 H.264)
+   └──────────────────────┤  mediamtx     │◄──────────────  --rtsp-url ...
+                          └──────────────┘                  (MJPEG 仍照常出 /stream /snapshot)
+```
+
+**前提**：摄像头能出 H.264（`v4l2-ctl --device=/dev/video0 --list-formats-ext` 里有 `H264`）。
+
+一条命令装好（自动装 MediaMTX + 配 WebRTC）：
+
+```bash
+./robot/camera_stream/install.sh \
+    --device /dev/video0 \
+    --input-format h264 \        # 摄像头直连 H.264 -> 零转码直通(最优)
+    --webrtc \                   # 装 MediaMTX 并推送 H.264 到 rtsp://127.0.0.1:8554/cam
+    --view 720p --fps 30 \
+    --token 你的密钥
+```
+
+跑完：
+- **WebRTC 直播**：`http://<香橙派IP>:8889/cam`（亚秒级）
+- MJPEG 兜底仍在：`http://<香橙派IP>:8090/stream`
+- 摄像头自带网页右下角会出现「⚡ 低延迟 WebRTC」直达链接。
+
+常用选项：
+```bash
+--webrtc                  # 启用 WebRTC(默认推 rtsp://127.0.0.1:8554/cam,并自动装 MediaMTX)
+--rtsp-url URL            # 自定义 MediaMTX 推送目标(隐含 --webrtc)
+--rtsp-transport tcp|udp  # 推送传输(默认 tcp)
+--mediamtx                # 只(重)装 MediaMTX 网关
+--input-format h264       # 摄像头直连 H.264 直通;不给则 ffmpeg 软编 x264(ultrafast/zerolatency)
+--h264-enc-arg ARG        # 自定义 H.264 编码器(可重复),如接硬编:
+                          #   --h264-enc-arg -c:v --h264-enc-arg h264_v4l2m2m
+```
+
+> 只有 MJPEG/YUYV 摄像头：省略 `--input-format h264`，ffmpeg 会用软编
+> `libx264`(ultrafast + zerolatency) 转出 H.264 给 WebRTC；720p 在 RK3566 上可行，
+> 1080p 偏吃力，建议 `--view 720p` 或接硬编（`--h264-enc-arg`）。
+
+### 在上位机控制面板里看 WebRTC
+面板同时支持 MJPEG 与 WebRTC；配了 WebRTC 就优先用它、断开自动回退 MJPEG：
+```bash
+./robot/piper_http_bridge/host_controller/install.sh \
+    --endpoint http://<机械臂>:8080 --token SECRET \
+    --camera http://<香橙派IP>:8090/stream.mjpeg \
+    --camera-webrtc http://<香橙派IP>:8889/cam
+```
+
+### MediaMTX 运维
+```bash
+sudo systemctl status mediamtx     # 网关状态
+journalctl -u mediamtx -f          # 网关日志
+# 手动重装/改路径: ./robot/camera_stream/install_mediamtx.sh --path cam
+```
+
+---
+
+## 四、分辨率预设（`--view`）
 
 `qvga`(320×240)、`vga`(640×480)、`svga`(800×600)、`720p`/`hd`(1280×720)、
 `1080p`/`fhd`(1920×1080)，也可直接写 `640x480` 这种形式。`--view` 优先于
@@ -129,7 +194,7 @@ v4l2-ctl --device=/dev/video0 --list-formats-ext
 
 ---
 
-## 四、本地干跑测试（无需真机/无需相机/无需ffmpeg）
+## 五、本地干跑测试（无需真机/无需相机/无需ffmpeg）
 
 测试用桩顶替 ffmpeg/ffprobe 子进程，在本机（甚至 Windows）直接验证
 MJPEG 分帧、帧广播、快照、网页与各 HTTP 端点：
