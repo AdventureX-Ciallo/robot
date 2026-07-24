@@ -27,6 +27,7 @@
 #   --with-controller   also install the web control panel (piper-controller svc)
 #   --controller-port N control panel port               (default 8000)
 #   --controller-endpoint URL  endpoint the panel drives (default http://127.0.0.1:<http-port>)
+#   --camera URL        MJPEG camera stream shown in the panel (optional)
 #   --no-service        install but do not install/start systemd
 #   --no-can            skip CAN bring-up (the server also brings can0 up itself)
 #   -h | --help         show this help
@@ -51,6 +52,7 @@ DO_CAN=1
 WITH_CONTROLLER=0
 CONTROLLER_PORT="${CONTROLLER_PORT:-8000}"
 CONTROLLER_ENDPOINT="${CONTROLLER_ENDPOINT:-}"
+CAMERA="${CAMERA:-}"
 
 PKG_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # the package dir
 PKG_NAME="piper_http_bridge"
@@ -83,6 +85,7 @@ while [[ $# -gt 0 ]]; do
     --with-controller) WITH_CONTROLLER=1; shift ;;
     --controller-port) CONTROLLER_PORT="$2"; shift 2 ;;
     --controller-endpoint) CONTROLLER_ENDPOINT="$2"; shift 2 ;;
+    --camera)        CAMERA="$2"; shift 2 ;;
     -h|--help)     sed -n '2,32p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) die "unknown option: $1 (use --help)" ;;
   esac
@@ -249,6 +252,7 @@ if [[ "$WITH_CONTROLLER" -eq 1 ]]; then
     CEP="${CONTROLLER_ENDPOINT:-http://127.0.0.1:$HTTP_PORT}"
     CTRL_ARGS=(--endpoint "$CEP" --port "$CONTROLLER_PORT" --speed "$SPEED")
     [[ -n "$TOKEN" ]] && CTRL_ARGS+=(--token "$TOKEN")
+    [[ -n "$CAMERA" ]] && CTRL_ARGS+=(--camera "$CAMERA")
     [[ "$INSTALL_SERVICE" -eq 0 ]] && CTRL_ARGS+=(--no-service)
     if bash "$CTRL_INSTALL" "${CTRL_ARGS[@]}"; then
       ok "control panel installed"

@@ -12,6 +12,8 @@
 #   --port N         panel listen port           (default 8000)
 #   --host IP        panel listen host           (default 0.0.0.0)
 #   --speed N        joint jog speed %%          (default 30)
+#   --camera URL     MJPEG camera stream shown in the panel (optional)
+#   --ws-rate N      WebSocket state push rate Hz  (default 10)
 #   --prefix DIR     install location            (default /opt/piper_controller)
 #   --no-service     install files but do not install/start systemd
 #   -h | --help      show this help
@@ -23,6 +25,8 @@ TOKEN="${TOKEN:-}"
 PORT="${PORT:-8000}"
 HOST="${HOST:-0.0.0.0}"
 SPEED="${SPEED:-30}"
+CAMERA="${CAMERA:-}"
+WS_RATE="${WS_RATE:-10}"
 PREFIX="${PREFIX:-/opt/piper_controller}"
 INSTALL_SERVICE=1
 SERVICE_NAME="piper-controller.service"
@@ -44,6 +48,8 @@ while [[ $# -gt 0 ]]; do
     --port)      PORT="$2"; shift 2 ;;
     --host)      HOST="$2"; shift 2 ;;
     --speed)     SPEED="$2"; shift 2 ;;
+    --camera)    CAMERA="$2"; shift 2 ;;
+    --ws-rate)   WS_RATE="$2"; shift 2 ;;
     --prefix)    PREFIX="$2"; shift 2 ;;
     --no-service) INSTALL_SERVICE=0; shift ;;
     -h|--help)   sed -n '2,22p' "${BASH_SOURCE[0]}"; exit 0 ;;
@@ -72,6 +78,8 @@ if [[ "$INSTALL_SERVICE" -eq 1 ]]; then
   log "[2/3] Installing + starting systemd unit ($SERVICE_NAME)"
   TOKEN_ARG=""
   [[ -n "$TOKEN" ]] && TOKEN_ARG="--token $TOKEN"
+  CAMERA_ARG=""
+  [[ -n "$CAMERA" ]] && CAMERA_ARG="--camera $CAMERA"
   UNIT="$(mktemp)"
   cat > "$UNIT" <<UNIT_EOF
 [Unit]
@@ -82,7 +90,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=$RUN_USER
-ExecStart=/usr/bin/python3 $PREFIX/host_controller/piper_controller.py --endpoint $ENDPOINT --host $HOST --port $PORT --speed $SPEED $TOKEN_ARG
+ExecStart=/usr/bin/python3 $PREFIX/host_controller/piper_controller.py --endpoint $ENDPOINT --host $HOST --port $PORT --speed $SPEED --ws-rate $WS_RATE $TOKEN_ARG $CAMERA_ARG
 Restart=on-failure
 RestartSec=3
 
