@@ -113,6 +113,29 @@ python3 ./robot/camera_stream/scripts/camera_stream_server.py \
 curl http://192.168.1.100:8090/snapshot -o frame.jpg
 ```
 
+### 批量采集 YOLO 训练图片
+如果要从机械臂/牌桌当前相机视角采集 200~300 张训练图，可用内置脚本循环调用
+`/snapshot`：
+
+```bash
+python ./robot/camera_stream/scripts/capture_snapshots.py \
+    --base-url http://192.168.1.100:8090 \
+    --out ./datasets/mahjong_raw/images \
+    --count 300 \
+    --interval 0.5
+```
+
+如果服务启用了 token：
+
+```bash
+python ./robot/camera_stream/scripts/capture_snapshots.py \
+    --base-url http://192.168.1.100:8090 \
+    --out ./datasets/mahjong_raw/images \
+    --count 300 \
+    --interval 0.5 \
+    --token 你的密钥
+```
+
 ---
 
 ## 三、低延迟直播（WebRTC，亚秒级）

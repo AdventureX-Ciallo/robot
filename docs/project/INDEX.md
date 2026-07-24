@@ -8,6 +8,8 @@
 - [HUSKYLENS 2 视觉模块对接调研与集成说明](2026-07-24-huskylens2-vision-integration-notes.md)
 - [robot 后端仓库对接说明](2026-07-24-robot-backend-integration-notes.md)
 - [麻将牌 YOLO 识别模型训练 SOP](2026-07-24-yolo-mahjong-training-sop.md)
+- [PiPER 夹取/出牌示教数据采集 SOP](2026-07-24-teleop-demonstration-data-sop.md)
+- [π0.5 / openpi 调研说明](2026-07-24-pi05-vla-research-notes.md)
 
 ## 相关调研
 
