@@ -139,6 +139,10 @@ class PiperClient(object):
     def block_arm(self, block=True):
         return self.cmd("block_arm", block=block)
 
+    def set_mode(self, mode):
+        """mode: 'joint' (MOVE J) or 'pose' (MOVE P)."""
+        return self.cmd("set_mode", mode=mode)
+
 
 # ---------------------------------------------------------------------------
 # CLI

@@ -20,19 +20,28 @@ Keyboard (focus on the page):
     C / V   : pitch + / pitch -
     R / F   : yaw + / yaw -
     G / H   : gripper close / open
-    1..6    : select joint; [ / ] jog that joint - / +
-    Space   : stop (estop)   ;  Enter : enable
+Hold a key or an on-screen button to jog continuously; release to stop.
+Space / Enter are intentionally NOT bound (they clash with Tab focus);
+enable / disable / estop / go-zero are on-page buttons only.
 All of the above is also clickable on the panel.
+
+State is pushed to the browser over a WebSocket (~10 Hz) for a smooth,
+low-latency panel; if the socket cannot be established the panel falls
+back to plain HTTP polling. Pure standard library, no external deps.
 
 Security: the panel forwards your bearer token to the endpoint; it is never
 stored. If you expose this beyond localhost, put it behind the same token.
 """
 
 import argparse
+import base64
+import hashlib
 import json
 import os
+import struct
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -148,9 +157,126 @@ class Controller(object):
 
 
 # ---------------------------------------------------------------------------
+# Minimal RFC6455 WebSocket layer (stdlib only) for smooth state streaming.
+# ---------------------------------------------------------------------------
+_WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
+def _ws_accept(key):
+    h = hashlib.sha1((key + _WS_GUID).encode("ascii")).digest()
+    return base64.b64encode(h).decode("ascii")
+
+
+def _ws_frame_text(text):
+    """Encode one unmasked, FIN-set text frame."""
+    payload = text.encode("utf-8")
+    header = bytearray([0x81])
+    n = len(payload)
+    if n < 126:
+        header.append(n)
+    elif n < 0x10000:
+        header.append(126)
+        header += struct.pack("!H", n)
+    else:
+        header.append(127)
+        header += struct.pack("!Q", n)
+    return bytes(header) + payload
+
+
+class WSClient(object):
+    """One connected WebSocket peer that only ever receives state pushes."""
+
+    def __init__(self, rfile, wfile):
+        self.rfile = rfile
+        self.wfile = wfile
+        self.lock = threading.Lock()
+        self.alive = True
+
+    def send(self, text):
+        if not self.alive:
+            return
+        try:
+            with self.lock:
+                self.wfile.write(_ws_frame_text(text))
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError, ValueError):
+            self.alive = False
+
+
+class WSHub(object):
+    """Tracks connected clients, polls the arm, broadcasts state ~10 Hz."""
+
+    def __init__(self, ctrl, hz=10.0):
+        self.ctrl = ctrl
+        self.interval = 1.0 / max(1.0, float(hz))
+        self.clients = []
+        self._lock = threading.Lock()
+
+    def add(self, client):
+        with self._lock:
+            self.clients.append(client)
+        self._ensure_running()
+
+    def _remove_dead(self):
+        with self._lock:
+            self.clients = [c for c in self.clients if c.alive]
+
+    def _ensure_running(self):
+        with self._lock:
+            if getattr(self, "_thread", None) and self._thread.is_alive():
+                return
+            self._thread = threading.Thread(target=self._loop, daemon=True)
+            self._thread.start()
+
+    def _loop(self):
+        while True:
+            with self._lock:
+                if not self.clients:
+                    return  # no viewers; a later add() restarts the loop
+            try:
+                msg = json.dumps(self.ctrl.state())
+            except Exception as e:
+                msg = json.dumps({"ok": False, "error": str(e)})
+            with self._lock:
+                for c in self.clients:
+                    c.send(msg)
+            self._remove_dead()
+            time.sleep(self.interval)
+
+
+def _ws_consume_one_frame(rfile):
+    """Block until one full WebSocket frame arrives (to catch the client
+    closing / erroring). Returns False when the connection is dead."""
+    try:
+        hdr = rfile.read(2)
+        if len(hdr) < 2:
+            return False
+        opcode = hdr[0] & 0x0F
+        length = hdr[1] & 0x7F
+        if length == 126:
+            ext = rfile.read(2)
+            if len(ext) < 2:
+                return False
+            length = struct.unpack("!H", ext)[0]
+        elif length == 127:
+            ext = rfile.read(8)
+            if len(ext) < 8:
+                return False
+            length = struct.unpack("!Q", ext)[0]
+        if hdr[1] & 0x80:                       # masked -> consume mask key
+            if len(rfile.read(4)) < 4:
+                return False
+        if length and len(rfile.read(length)) < length:
+            return False
+        return opcode != 0x8                    # 0x8 == close frame
+    except (BrokenPipeError, ConnectionResetError, OSError, ValueError):
+        return False
+
+
+# ---------------------------------------------------------------------------
 # HTTP server: serves the panel HTML + a /api/* JSON proxy to the Controller.
 # ---------------------------------------------------------------------------
-def make_handler(ctrl, panel_html):
+def make_handler(ctrl, panel_html, hub=None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "PiperController/1.0"
 
@@ -185,11 +311,38 @@ def make_handler(ctrl, panel_html):
             self._send(code, "text/plain; charset=us-ascii", body)
 
         def do_GET(self):
+            if self.path == "/ws":
+                return self._ws_handshake()
             if self.path in ("/", "/index.html"):
                 return self._html(200, panel_html)
             if self.path == "/api/state":
                 return self._json(200, ctrl.state())
             return self._json(404, {"ok": False, "error": "not found"})
+
+        def _ws_handshake(self):
+            if hub is None:
+                return self._send(404, "text/plain", b"websocket disabled")
+            key = self.headers.get("Sec-WebSocket-Key")
+            upgrade = (self.headers.get("Upgrade") or "").lower()
+            if not key or upgrade != "websocket":
+                return self._send(400, "text/plain", b"bad websocket request")
+            try:
+                self.send_response(101, "Switching Protocols")
+                self.send_header("Upgrade", "websocket")
+                self.send_header("Connection", "Upgrade")
+                self.send_header("Sec-WebSocket-Accept", _ws_accept(key))
+                self.end_headers()
+                self.wfile.flush()
+            except (UnicodeEncodeError, BrokenPipeError, ConnectionResetError):
+                return
+            client = WSClient(self.rfile, self.wfile)
+            hub.add(client)
+            # Park this thread until the client disconnects so the HTTP server
+            # does not tear down the (now upgraded) socket.
+            while client.alive:
+                if not _ws_consume_one_frame(self.rfile):
+                    client.alive = False
+            self.close_connection = True
 
         def do_POST(self):
             try:
@@ -234,18 +387,30 @@ def main():
     ap.add_argument("--port", type=int, default=8000, help="panel listen port")
     ap.add_argument("--host", default="0.0.0.0", help="panel listen host")
     ap.add_argument("--speed", type=int, default=30, help="joint jog speed %%")
+    ap.add_argument("--camera", default="",
+                    help="MJPEG camera stream URL shown in the panel "
+                         "(e.g. http://<orangepi>:8090/stream.mjpeg)")
+    ap.add_argument("--ws-rate", type=float, default=10.0,
+                    help="WebSocket state push rate in Hz (default 10)")
     args = ap.parse_args()
 
     panel_path = os.path.join(HERE, "panel.html")
     with open(panel_path, "r", encoding="utf-8") as f:
         panel_html = f.read()
+    # inject the camera stream URL (empty string hides the camera card)
+    panel_html = panel_html.replace("__CAMERA_URL__", args.camera)
 
     ctrl = Controller(args.endpoint, token=args.token, speed=args.speed)
-    httpd = ThreadingHTTPServer((args.host, args.port), make_handler(ctrl, panel_html))
+    hub = WSHub(ctrl, hz=args.ws_rate)
+    httpd = ThreadingHTTPServer((args.host, args.port),
+                                make_handler(ctrl, panel_html, hub))
     httpd.daemon_threads = True
     print("Piper controller panel")
     print("  endpoint : %s" % args.endpoint)
-    print("  panel    : http://%s:%d/" % (args.host, args.port))
+    print("  panel    : http://%s:%d/  (state pushed over WebSocket @ %.0f Hz)"
+          % (args.host, args.port, args.ws_rate))
+    if args.camera:
+        print("  camera   : %s" % args.camera)
     print("  open that URL in a browser, then use WASD/QE/XZ/G/H to drive the arm.")
     try:
         httpd.serve_forever()

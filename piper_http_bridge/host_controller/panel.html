@@ -14,29 +14,30 @@
   body{margin:0;background:var(--bg);color:var(--txt);
        font-family:ui-sans-serif,system-ui,"Segoe UI",Roboto,"Microsoft YaHei",sans-serif;
        -webkit-user-select:none;user-select:none}
-  header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;
-         align-items:center;gap:14px;flex-wrap:wrap}
-  header h1{font-size:18px;margin:0;font-weight:600}
+  header{padding:12px 20px;border-bottom:1px solid var(--line);display:flex;
+         align-items:center;gap:12px;flex-wrap:wrap}
+  header h1{font-size:17px;margin:0;font-weight:600}
   .pill{padding:3px 10px;border-radius:20px;font-size:12px;background:var(--card2);
         border:1px solid var(--line)}
   .pill.on{background:#12351a;color:var(--acc);border-color:var(--acc)}
   .pill.off{background:#3a1d1d;color:var(--danger);border-color:var(--danger)}
-  .wrap{display:grid;grid-template-columns:340px 1fr 300px;gap:14px;padding:14px}
-  @media(max-width:1100px){.wrap{grid-template-columns:1fr}}
+  .pill.mode{background:#13233a;color:#7db4ff;border-color:var(--acc2)}
+  .kbd{display:inline-block;min-width:24px;text-align:center;padding:2px 6px;
+       background:var(--key);border:1px solid var(--line);border-bottom-width:3px;
+       border-radius:6px;font-family:ui-monospace,monospace;font-size:11px;color:var(--txt)}
+  .wrap{display:grid;grid-template-columns:330px 1fr 300px;gap:14px;padding:14px}
+  @media(max-width:1150px){.wrap{grid-template-columns:1fr}}
   .card{background:var(--card);border:1px solid var(--line);border-radius:10px;
         padding:14px;margin-bottom:14px}
-  .card h2{font-size:13px;margin:0 0 10px;color:var(--dim);text-transform:uppercase;
+  .card h2{font-size:12px;margin:0 0 10px;color:var(--dim);text-transform:uppercase;
            letter-spacing:.5px;font-weight:600}
-  .kbd{display:inline-block;min-width:26px;text-align:center;padding:3px 7px;
-       background:var(--key);border:1px solid var(--line);border-bottom-width:3px;
-       border-radius:6px;font-family:ui-monospace,monospace;font-size:12px;color:var(--txt)}
-  .grid{display:grid;gap:8px}
-  .pad{display:grid;grid-template-columns:repeat(3,56px);grid-auto-rows:48px;gap:8px;
+  .pad{display:grid;grid-template-columns:repeat(3,74px);grid-auto-rows:48px;gap:8px;
        justify-content:center}
   .pad button,.btn{background:var(--card2);color:var(--txt);border:1px solid var(--line);
-       border-radius:8px;font-size:15px;cursor:pointer;transition:.08s}
+       border-radius:8px;font-size:15px;cursor:pointer;transition:background .06s,transform .06s}
   .pad button:hover,.btn:hover{border-color:var(--acc2)}
-  .pad button:active,.btn:active,.btn.press{background:var(--acc2);transform:scale(.96)}
+  .pad button:active,.btn:active,.btn.press,.pad button.press{background:var(--acc2);
+       transform:scale(.95)}
   .pad .lbl{font-size:10px;color:var(--dim);display:block;margin-top:2px}
   .btn{padding:10px 14px;font-size:14px}
   .btn.block{display:block;width:100%;margin-bottom:8px}
@@ -50,18 +51,22 @@
   .seg button.on{background:var(--acc2);color:#fff}
   .state{font-family:ui-monospace,monospace;font-size:12px;line-height:1.7;white-space:pre-wrap}
   .joint{display:flex;align-items:center;gap:8px;margin-bottom:8px}
-  .joint .name{width:52px;font-size:13px;color:var(--dim)}
-  .joint .val{width:70px;font-family:ui-monospace,monospace;font-size:13px;text-align:right}
+  .joint .name{width:40px;font-size:13px;color:var(--dim)}
+  .joint .val{width:64px;font-family:ui-monospace,monospace;font-size:12px;text-align:right}
   .joint button{flex:1;background:var(--card2);color:var(--txt);border:1px solid var(--line);
-       border-radius:6px;padding:8px 0;cursor:pointer}
-  .joint button:active{background:var(--acc2)}
+       border-radius:6px;padding:9px 0;cursor:pointer}
+  .joint button:active,.joint button.press{background:var(--acc2)}
   .muted{color:var(--dim);font-size:12px;line-height:1.6}
   #toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);
        background:#3a1d1d;border:1px solid var(--danger);color:#ffb3ad;
-       padding:10px 16px;border-radius:8px;font-size:13px;display:none;z-index:99}
+       padding:10px 16px;border-radius:8px;font-size:13px;display:none;z-index:99;max-width:80vw}
   .legend{display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px;color:var(--dim)}
   .legend div{display:flex;align-items:center;gap:6px}
-  h3.sub{font-size:12px;color:var(--dim);margin:14px 0 8px;font-weight:600}
+  h3.sub{font-size:11px;color:var(--dim);margin:14px 0 8px;font-weight:600}
+  #cam{width:100%;border-radius:8px;background:#000;aspect-ratio:16/9;object-fit:cover;
+       border:1px solid var(--line)}
+  input[type=range]{width:100%;accent-color:var(--acc2);cursor:pointer}
+  .flash{outline:2px solid var(--acc);outline-offset:1px}
 </style>
 </head>
 <body>
@@ -69,6 +74,7 @@
   <h1>🦾 Piper 机械臂控制面板</h1>
   <span id="conn" class="pill">连接中…</span>
   <span id="en" class="pill">未知</span>
+  <span id="mode" class="pill mode" title="move 模式">模式 —</span>
   <span style="flex:1"></span>
   <span class="muted">步长</span>
   <div class="seg" id="stepSeg">
@@ -79,12 +85,12 @@
 </header>
 
 <div class="wrap">
-  <!-- 左：笛卡尔点动 -->
+  <!-- 左:笛卡尔点动 + 夹爪 -->
   <div>
     <div class="card">
-      <h2>末端点动（夹爪 = 有方向的质点）</h2>
+      <h2>末端点动（按住连续，松开停止）</h2>
       <h3 class="sub">平移</h3>
-      <div class="pad" style="grid-template-columns:repeat(3,72px)">
+      <div class="pad">
         <span></span><button data-jog="dx:+1"><span class="kbd">W</span><span class="lbl">前 +X</span></button><span></span>
         <button data-jog="dy:+1"><span class="kbd">A</span><span class="lbl">左 +Y</span></button>
         <button data-jog="dx:-1"><span class="kbd">S</span><span class="lbl">后 −X</span></button>
@@ -94,7 +100,7 @@
         <button data-jog="dz:-1"><span class="kbd">E</span><span class="lbl">下 −Z</span></button>
       </div>
       <h3 class="sub">旋转</h3>
-      <div class="pad" style="grid-template-columns:repeat(3,72px)">
+      <div class="pad">
         <button data-jog="droll:+1"><span class="kbd">X</span><span class="lbl">滚转 +</span></button>
         <button data-jog="dpitch:+1"><span class="kbd">C</span><span class="lbl">俯仰 +</span></button>
         <button data-jog="dyaw:+1"><span class="kbd">R</span><span class="lbl">偏航 +</span></button>
@@ -110,19 +116,24 @@
         <button class="btn" id="gClose" style="flex:1"><span class="kbd">G</span> 合抓</button>
         <button class="btn" id="gOpen" style="flex:1"><span class="kbd">H</span> 放开</button>
       </div>
-      <input type="range" id="grip" min="0" max="80" value="0" style="width:100%">
-      <div class="muted" style="text-align:center"><span id="gripVal">0</span> mm</div>
+      <input type="range" id="grip" min="0" max="80" step="1" value="0">
+      <div class="muted" style="text-align:center">实际开度 <b id="gripVal">0</b> mm</div>
+    </div>
+
+    <div class="card" id="camCard" style="display:none">
+      <h2>摄像头</h2>
+      <img id="cam" alt="camera stream">
     </div>
   </div>
 
-  <!-- 中：状态 + 模式 -->
+  <!-- 中:模式 + 状态 -->
   <div>
     <div class="card">
       <h2>模式 / 安全</h2>
-      <button class="btn block green" id="btnEnable">使能 (Enter)</button>
+      <button class="btn block green" id="btnEnable">使能机械臂</button>
       <button class="btn block amber" id="btnZero">回零位</button>
       <button class="btn block" id="btnDisable">失能</button>
-      <button class="btn block red" id="btnStop">⛔ 急停 (Space)</button>
+      <button class="btn block red" id="btnStop">⛔ 急停</button>
     </div>
     <div class="card">
       <h2>实时状态</h2>
@@ -130,7 +141,7 @@
     </div>
   </div>
 
-  <!-- 右：关节点动 + 说明 -->
+  <!-- 右:关节点动 + 说明 -->
   <div>
     <div class="card">
       <h2>按轴点动（关节）</h2>
@@ -147,9 +158,8 @@
         <div><span class="kbd">R</span>/<span class="kbd">F</span> 偏航±</div>
         <div><span class="kbd">G</span> 合抓</div>
         <div><span class="kbd">H</span> 放开</div>
-        <div><span class="kbd">Space</span> 急停</div>
-        <div><span class="kbd">Enter</span> 使能</div>
       </div>
+      <p class="muted" style="margin-top:10px">提示：按住按键/按钮可连续点动，松开即停。</p>
     </div>
   </div>
 </div>
@@ -159,16 +169,19 @@
 <script>
 "use strict";
 const $ = s => document.querySelector(s);
+const CAMERA_URL = "__CAMERA_URL__";
 let stepSize = "M";
 const TRANS = {S:0.005, M:0.02, L:0.05};
 const ROT   = {S:2, M:5, L:15};
 const JSTEP = {S:1, M:3, L:10};
 const GRIP  = {S:2, M:10, L:40};
 
-let lastState = null;
-let gripPos = 0;
+// ---- 夹爪目标(命令侧) vs 实际(反馈侧) ----
+let gripTarget = 0;        // 本地维护的目标值(命令)
+let gripActual = 0;        // 机械臂反馈的实际值(用于渲染滑条)
+let gripEditing = false;   // 用户正在拖滑条
 
-// ---------- API ----------
+// ---------- 网络 ----------
 async function api(path, payload){
   try{
     const opt = payload ? {method:"POST",headers:{"Content-Type":"application/json"},
@@ -178,93 +191,124 @@ async function api(path, payload){
   }catch(e){ return {ok:false, error:String(e)}; }
 }
 function toast(msg){
-  const t = $("#toast"); t.textContent = msg; t.style.display="block";
-  clearTimeout(t._h); t._h = setTimeout(()=>t.style.display="none", 2500);
+  const t=$("#toast"); t.textContent=msg; t.style.display="block";
+  clearTimeout(t._h); t._h=setTimeout(()=>t.style.display="none",2500);
 }
-async function doCmd(payload){
-  const r = await api("/api/"+payload.action, payload) ;
-  if(r && r.ok===false) toast(r.error || "命令失败");
-  refresh();
-  return r;
-}
-
-// ---------- 点动 ----------
-// dir: {axis: +1/-1}
-function jog(d){ doCmd(Object.assign({action:"jog"}, d)); }
-
-const JOGMAP = {
-  w:{dx:+1}, s:{dx:-1}, a:{dy:+1}, d:{dy:-1}, q:{dz:+1}, e:{dz:-1},
-  x:{droll:+1}, z:{droll:-1}, c:{dpitch:+1}, v:{dpitch:-1},
-  r:{dyaw:+1}, f:{dyaw:-1},
-};
-function jogScaled(spec){
-  const d = {};
-  for(const k in spec){
-    const v = spec[k];
-    if(k==="dx"||k==="dy"||k==="dz") d[k]= v*TRANS[stepSize];
-    else d[k]= v*ROT[stepSize];
-  }
-  jog(d);
-}
-
-// 点击按钮
-document.querySelectorAll("[data-jog]").forEach(b=>{
-  b.addEventListener("click", ()=>{
-    const [axis,sign] = b.dataset.jog.split(":");
-    jogScaled({[axis]: Number(sign)});
+function doCmd(payload){
+  // 立即回显(见 flash),发送后静默;状态由轮询刷新
+  return api("/api/"+payload.action, payload).then(r=>{
+    if(r && r.ok===false) toast(r.error||"命令失败");
+    return r;
   });
+}
+
+// ---------- 回显 ----------
+function flash(el){ if(!el) return; el.classList.add("press");
+  setTimeout(()=>el.classList.remove("press"),160); }
+function flashKey(k){
+  const map={g:"#gClose",h:"#gOpen"};
+  if(map[k]) return flash($(map[k]));
+  const spec=JOGMAP[k];
+  if(!spec) return;
+  const axis=Object.keys(spec)[0], sign=(spec[axis]>0?"+1":"-1");
+  const btn=document.querySelector(`[data-jog="${axis}:${sign}"]`);
+  if(btn) flash(btn);
+}
+
+// ---------- 笛卡尔点动 ----------
+function scaled(spec){
+  const d={action:"jog"};
+  for(const k in spec){ const v=spec[k];
+    d[k]= (k==="dx"||k==="dy"||k==="dz") ? v*TRANS[stepSize] : v*ROT[stepSize]; }
+  return d;
+}
+// 连续点动:按下开始循环发送,松开停止
+const jogTimers={};
+function startJog(spec){ stopJogKey(spec); const d=scaled(spec); doCmd(d);
+  jogTimers[JSON.stringify(spec)]=setInterval(()=>doCmd(scaled(spec)),110); }
+function stopJogKey(spec){ const id=jogTimers[JSON.stringify(spec)];
+  if(id){ clearInterval(id); delete jogTimers[JSON.stringify(spec)]; } }
+
+const JOGMAP={w:{dx:+1},s:{dx:-1},a:{dy:+1},d:{dy:-1},q:{dz:+1},e:{dz:-1},
+              x:{droll:+1},z:{droll:-1},c:{dpitch:+1},v:{dpitch:-1},r:{dyaw:+1},f:{dyaw:-1}};
+
+// 按钮(鼠标/触屏)按住连续
+document.querySelectorAll("[data-jog]").forEach(b=>{
+  const [axis,sign]=b.dataset.jog.split(":");
+  const spec={[axis]:Number(sign)};
+  const start=e=>{e.preventDefault(); startJog(spec); flash(b);};
+  const stop=()=>stopJogKey(spec);
+  b.addEventListener("mousedown",start); b.addEventListener("touchstart",start,{passive:false});
+  b.addEventListener("mouseup",stop); b.addEventListener("mouseleave",stop);
+  b.addEventListener("touchend",stop);
 });
 
+// 键盘:按住连续,松开停止;不含 Space/Enter(避免与 Tab/按钮冲突)
+document.addEventListener("keydown",e=>{
+  const k=e.key.toLowerCase();
+  if(e.target.tagName==="INPUT") return;      // 不干扰滑条等输入
+  if(e.repeat) return;
+  if(k==="g"){ gripTo(gripActual-GRIP[stepSize]); flashKey("g"); return; }
+  if(k==="h"){ gripTo(gripActual+GRIP[stepSize]); flashKey("h"); return; }
+  if(JOGMAP[k]){ flashKey(k); startJog(JOGMAP[k]); }
+});
+document.addEventListener("keyup",e=>{
+  const k=e.key.toLowerCase();
+  if(JOGMAP[k]) stopJogKey(JOGMAP[k]);
+});
+window.addEventListener("blur",()=>{ for(const s in jogTimers){clearInterval(jogTimers[s]);delete jogTimers[s];} });
+
 // ---------- 夹爪 ----------
-function gripTo(mm){ gripPos=Math.max(0,Math.min(80,mm));
-  $("#grip").value=gripPos; $("#gripVal").textContent=Math.round(gripPos);
-  doCmd({action:"gripper", position_mm:gripPos}); }
-$("#gOpen").onclick = ()=> gripTo(gripPos + GRIP[stepSize]);
-$("#gClose").onclick= ()=> gripTo(gripPos - GRIP[stepSize]);
-$("#grip").addEventListener("change", e=> gripTo(Number(e.target.value)));
-$("#grip").addEventListener("input", e=> $("#gripVal").textContent=e.target.value);
+function gripTo(mm){
+  // 目标值基于实际反馈推算,避免连续按键期间目标漂移/回跳
+  gripTarget=Math.max(0,Math.min(80,mm));
+  doCmd({action:"gripper", position_mm:gripTarget});
+}
+function gripHandler(btn,dir){
+  let t=null;
+  const stepOnce=()=>gripTo(gripActual+dir*GRIP[stepSize]);
+  const start=e=>{e.preventDefault(); stepOnce(); flash(btn);
+                  t=setInterval(stepOnce,140);};
+  const stop=()=>{ if(t){clearInterval(t);t=null;} };
+  btn.addEventListener("mousedown",start); btn.addEventListener("touchstart",start,{passive:false});
+  btn.addEventListener("mouseup",stop); btn.addEventListener("mouseleave",stop);
+  btn.addEventListener("touchend",stop);
+}
+gripHandler($("#gOpen"),+1);
+gripHandler($("#gClose"),-1);
+// 滑条:拖动时直接设目标;渲染值来自实际反馈(不在拖动时被覆盖)
+$("#grip").addEventListener("input",e=>{ gripEditing=true; gripTo(Number(e.target.value)); });
+$("#grip").addEventListener("change",()=>{ gripEditing=false; });
 
 // ---------- 模式 ----------
-$("#btnEnable").onclick = ()=> doCmd({action:"enable"});
-$("#btnDisable").onclick= ()=> doCmd({action:"disable"});
-$("#btnStop").onclick   = ()=> doCmd({action:"stop"});
-$("#btnZero").onclick   = ()=> doCmd({action:"go_zero"});
+$("#btnEnable").onclick =()=>{flash($("#btnEnable")); doCmd({action:"enable"});};
+$("#btnDisable").onclick=()=>{flash($("#btnDisable")); doCmd({action:"disable"});};
+$("#btnStop").onclick   =()=>{flash($("#btnStop")); doCmd({action:"stop"});};
+$("#btnZero").onclick   =()=>{flash($("#btnZero")); doCmd({action:"go_zero"});};
 
 // ---------- 关节点动 ----------
 const JOINT_NAMES=["J1","J2","J3","J4","J5","J6"];
-function buildJoints(){
-  const box=$("#joints"); box.innerHTML="";
+(function buildJoints(){
+  const box=$("#joints");
   JOINT_NAMES.forEach((n,i)=>{
     const row=document.createElement("div"); row.className="joint";
     row.innerHTML=`<span class="name">${n}</span>
-      <button data-j="${i}" data-d="-1">−</button>
+      <button data-d="-1">−</button>
       <span class="val" id="jv${i}">—</span>
-      <button data-j="${i}" data-d="+1">+</button>`;
+      <button data-d="+1">+</button>`;
     box.appendChild(row);
-  });
-  box.querySelectorAll("button").forEach(b=>{
-    b.addEventListener("click", ()=>{
-      doCmd({action:"joint_jog", index:Number(b.dataset.j),
-             delta: Number(b.dataset.d)*JSTEP[stepSize]});
+    row.querySelectorAll("button").forEach(b=>{
+      let t=null; const d=Number(b.dataset.d);
+      const start=e=>{e.preventDefault(); flash(b);
+        doCmd({action:"joint_jog",index:i,delta:d*JSTEP[stepSize]});
+        t=setInterval(()=>doCmd({action:"joint_jog",index:i,delta:d*JSTEP[stepSize]}),140);};
+      const stop=()=>{ if(t){clearInterval(t);t=null;} };
+      b.addEventListener("mousedown",start); b.addEventListener("touchstart",start,{passive:false});
+      b.addEventListener("mouseup",stop); b.addEventListener("mouseleave",stop);
+      b.addEventListener("touchend",stop);
     });
   });
-}
-buildJoints();
-
-// ---------- 键盘 ----------
-const held = new Set();
-document.addEventListener("keydown", e=>{
-  if(e.repeat) return;
-  const k = e.key.toLowerCase();
-  if(k===" "){ e.preventDefault(); doCmd({action:"stop"}); flash($("#btnStop")); return; }
-  if(k==="enter"){ doCmd({action:"enable"}); flash($("#btnEnable")); return; }
-  if(k==="g"){ gripTo(gripPos - GRIP[stepSize]); return; }
-  if(k==="h"){ gripTo(gripPos + GRIP[stepSize]); return; }
-  if(JOGMAP[k]){ jogScaled(JOGMAP[k]); held.add(k); }
-});
-document.addEventListener("keyup", e=> held.delete(e.key.toLowerCase()));
-
-function flash(el){ el.classList.add("press"); setTimeout(()=>el.classList.remove("press"),150); }
+})();
 
 // ---------- 步长 ----------
 $("#stepSeg").querySelectorAll("button").forEach(b=>{
@@ -272,29 +316,66 @@ $("#stepSeg").querySelectorAll("button").forEach(b=>{
     $("#stepSeg").querySelectorAll("button").forEach(x=>x.classList.toggle("on",x===b)); };
 });
 
-// ---------- 状态轮询 ----------
+// ---------- 摄像头 ----------
+if(CAMERA_URL){ $("#camCard").style.display="block"; $("#cam").src=CAMERA_URL; }
+
+// ---------- 状态:WebSocket 推送(丝滑) + HTTP 轮询回退 ----------
 function fmt(v,d=2){ return (v===null||v===undefined)?"—":Number(v).toFixed(d); }
-async function refresh(){
-  const r = await api("/api/state");
-  const conn=$("#conn"), en=$("#en");
-  if(!r.ok){ conn.textContent="未连接"; conn.className="pill off"; return; }
+const MODE_TXT={0:"MOVE P",1:"MOVE J",2:"MOVE L",3:"MOVE C"};
+let _gotState=false;
+
+function render(r){
+  const conn=$("#conn"),en=$("#en"),mode=$("#mode");
+  if(!r || r.ok===false){
+    conn.textContent="未连接"; conn.className="pill off"; return false;
+  }
   conn.textContent="已连接"; conn.className="pill on";
-  const s = r.state||{}; lastState=s;
-  en.textContent = s.enabled? "已使能":"未使能";
-  en.className = "pill "+(s.enabled?"on":"off");
-  const j = s.joints_deg||[]; const p = s.end_pose||{};
+  const s=r.state||{};
+  en.textContent=s.enabled?"已使能":"未使能";
+  en.className="pill "+(s.enabled?"on":"off");
+  const mm=(s.move_mode!==undefined&&s.move_mode!==null)?s.move_mode
+          :(s.arm_status?s.arm_status.mode_feedback:null);
+  mode.textContent="模式 "+(MODE_TXT[mm]||"—");
+  const j=s.joints_deg||[]; const p=s.end_pose||{};
   j.forEach((v,i)=>{ const el=$("#jv"+i); if(el) el.textContent=fmt(v,1)+"°"; });
-  if(typeof s.gripper_mm==="number"){ gripPos=s.gripper_mm;
-    $("#grip").value=gripPos; $("#gripVal").textContent=Math.round(gripPos); }
-  $("#state").textContent =
+  // 滑条按实际反馈渲染(用户拖动中不覆盖)
+  if(typeof s.gripper_mm==="number"){
+    gripActual=s.gripper_mm; gripTarget=gripActual;   // 目标对齐实际,避免回跳
+    $("#gripVal").textContent=Math.round(gripActual);
+    if(!gripEditing) $("#grip").value=gripActual;
+  }
+  $("#state").textContent=
 `关节(°)  ${j.map(v=>fmt(v,1)).join("  ")}
 末端位置 X ${fmt(p.x,1)}  Y ${fmt(p.y,1)}  Z ${fmt(p.z,1)}  mm
 末端姿态 R ${fmt(p.roll,1)}  P ${fmt(p.pitch,1)}  Y ${fmt(p.yaw,1)}  °
 夹爪     ${fmt(s.gripper_mm,1)} mm
 状态码   ctrl=${s.arm_status?s.arm_status.ctrl_mode:"—"}  err=${s.arm_status?s.arm_status.err_code:"—"}`;
+  return true;
 }
-refresh();
-setInterval(refresh, 800);
+
+// HTTP 轮询回退(WS 建立前或失败时兜底)
+async function pollOnce(){
+  const r=await api("/api/state");
+  if(r && r.ok){ _gotState=true; render(r); }
+  else if(!_gotState){ $("#conn").textContent="未连接"; $("#conn").className="pill off"; }
+}
+let pollTimer=null;
+function startPolling(){ if(!pollTimer) pollTimer=setInterval(pollOnce,800); }
+function stopPolling(){ if(pollTimer){ clearInterval(pollTimer); pollTimer=null; } }
+
+function connectWS(){
+  let ws;
+  try{ ws=new WebSocket((location.protocol==="https:"?"wss://":"ws://")+location.host+"/ws"); }
+  catch(e){ startPolling(); return; }
+  ws.onopen=()=>{ stopPolling(); };
+  ws.onmessage=ev=>{ _gotState=true;
+    try{ render(JSON.parse(ev.data)); }catch(_){} };
+  ws.onclose=()=>{ $("#conn").textContent="未连接"; $("#conn").className="pill off";
+                   startPolling(); setTimeout(connectWS,1500); };
+  ws.onerror=()=>{ try{ws.close();}catch(_){} };
+}
+connectWS();
+startPolling();   // WS 接通前先用轮询,接通后自动停止
 </script>
 </body>
 </html>

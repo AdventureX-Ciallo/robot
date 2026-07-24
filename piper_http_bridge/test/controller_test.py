@@ -10,10 +10,14 @@ Run:  python test/controller_test.py   ->  exit 0 on success
 """
 
 import importlib.util
+import base64
 import json
 import os
+import socket
+import struct
 import sys
 import threading
+import time
 import types
 import urllib.request
 import urllib.error
@@ -179,12 +183,66 @@ def test_http_panel(mod):
         httpd.shutdown(); httpd.server_close()
 
 
+def _ws_read_text_frame(sock_file):
+    """Read one server->client (unmasked) text frame; returns the payload str."""
+    hdr = sock_file.read(2)
+    assert len(hdr) == 2, "short frame header"
+    fin_opcode, b1 = hdr[0], hdr[1]
+    assert fin_opcode & 0x0F == 0x1, "expected a text frame"
+    length = b1 & 0x7F
+    if length == 126:
+        length = struct.unpack("!H", sock_file.read(2))[0]
+    elif length == 127:
+        length = struct.unpack("!Q", sock_file.read(8))[0]
+    return sock_file.read(length).decode("utf-8")
+
+
+def test_websocket(mod):
+    print("[websocket state push]")
+    c = mod.Controller("http://127.0.0.1:8080")
+    hub = mod.WSHub(c, hz=50.0)      # fast for the test
+    handler = mod.make_handler(c, "<html>panel</html>", hub)
+    httpd = mod.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        s = socket.create_connection(("127.0.0.1", port), timeout=5)
+        f = s.makefile("rb")
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        req = ("GET /ws HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+               "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+               "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n" % key)
+        s.sendall(req.encode("ascii"))
+        # read the 101 response headers (terminated by a blank line)
+        status = f.readline().decode("latin-1")
+        check("ws 101 switching protocols", "101" in status)
+        accept = ""
+        while True:
+            line = f.readline().decode("latin-1")
+            if line in ("\r\n", "\n", ""):
+                break
+            if line.lower().startswith("sec-websocket-accept:"):
+                accept = line.split(":", 1)[1].strip()
+        check("ws accept header matches", accept == mod._ws_accept(key))
+        # the hub should push state frames containing the fake gripper value
+        payload = None
+        for _ in range(50):
+            payload = _ws_read_text_frame(f)
+            if "gripper_mm" in payload:
+                break
+        check("ws pushes state with gripper", payload and "gripper_mm" in payload)
+        s.close()
+    finally:
+        httpd.shutdown(); httpd.server_close()
+
+
 def main():
     mod = load_controller()
     test_jog_and_clamp(mod)
     test_joint_jog(mod)
     test_gripper_and_modes(mod)
     test_http_panel(mod)
+    test_websocket(mod)
     print("\n=================================")
     print("passed: %d   failed: %d" % (len(PASSED), len(FAILED)))
     for f in FAILED:

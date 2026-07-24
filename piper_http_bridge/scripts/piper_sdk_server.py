@@ -194,12 +194,40 @@ class PiperSDKBackend(object):
         self.enable_and_wait()
 
     # ---- helpers -------------------------------------------------------
+    # move-mode feedback codes (from the arm): 0x00 MOVE P, 0x01 MOVE J
+    MOVE_P, MOVE_J = 0x00, 0x01
+
     def _set_speed(self, speed):
         speed = sc.clamp_speed(speed)
         try:
             self.piper.MotionCtrl_2(0x01, 0x01, speed, 0x00)
         except AttributeError:
             self.piper.ModeCtrl(0x01, 0x01, speed, 0x00)
+
+    def _set_move_mode(self, move_mode, speed=None):
+        """Switch ctrl to CAN mode + given move_mode (MOVE_J / MOVE_P)."""
+        spd = sc.clamp_speed(speed if speed is not None else self._default_speed)
+        try:
+            self.piper.MotionCtrl_2(0x01, move_mode, spd, 0x00)
+        except AttributeError:
+            self.piper.ModeCtrl(0x01, move_mode, spd, 0x00)
+
+    def get_move_mode(self):
+        try:
+            return self.piper.GetArmStatus().arm_status.mode_feed
+        except Exception:
+            return None
+
+    def cmd_set_mode(self, mode):
+        """Explicitly set move mode: 'j'/'joint'/'move_j' or 'p'/'pose'/'move_p'."""
+        m = str(mode).strip().lower()
+        if m in ("j", "joint", "move_j", "0x01", "1"):
+            self._set_move_mode(self.MOVE_J)
+            return {"ok": True, "mode": "move_j"}
+        if m in ("p", "pose", "move_p", "0x00", "0"):
+            self._set_move_mode(self.MOVE_P)
+            return {"ok": True, "mode": "move_p"}
+        raise ValueError("mode must be 'joint' (move_j) or 'pose' (move_p)")
 
     # ---- state ---------------------------------------------------------
     def get_state(self):
@@ -246,6 +274,7 @@ class PiperSDKBackend(object):
             "gripper_mm": gripper_mm,
             "end_pose": end_pose,
             "arm_status": arm_status,
+            "move_mode": (arm_status or {}).get("mode_feedback"),
             "enabled": self._enabled,
             "stamp": time.time(),
         }
@@ -297,21 +326,21 @@ class PiperSDKBackend(object):
 
     def cmd_joint_ctrl(self, joints, speed=None, gripper_mm=None):
         joints = sc.validate_joints(joints)
-        self._set_speed(speed if speed is not None else self._default_speed)
+        spd = sc.clamp_speed(speed if speed is not None else self._default_speed)
         args = [int(round(j * 1000.0)) for j in joints]  # deg -> 0.001 deg
         with self._lock:
+            self._set_move_mode(self.MOVE_J, spd)   # joint control needs MOVE J
             self.piper.JointCtrl(*args)
             if gripper_mm is not None:
                 self.cmd_gripper(gripper_mm)
-        return {"ok": True, "joints_deg": joints,
-                "speed": sc.clamp_speed(speed if speed is not None
-                                        else self._default_speed)}
+        return {"ok": True, "joints_deg": joints, "speed": spd}
 
     def cmd_pose_ctrl(self, x, y, z, roll, pitch, yaw, gripper_mm=None):
         # mm -> 0.001 mm ; deg -> 0.001 deg
         X, Y, Z = (int(round(float(v) * 1000.0)) for v in (x, y, z))
         RX, RY, RZ = (int(round(float(v) * 1000.0)) for v in (roll, pitch, yaw))
         with self._lock:
+            self._set_move_mode(self.MOVE_P)        # end-pose control needs MOVE P
             self.piper.EndPoseCtrl(X, Y, Z, RX, RY, RZ)
             if gripper_mm is not None:
                 self.cmd_gripper(gripper_mm)

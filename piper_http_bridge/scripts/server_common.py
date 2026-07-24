@@ -97,6 +97,10 @@ def dispatch(backend, payload):
         return backend.cmd_go_zero(payload.get("is_mit_mode", False))
     if action == "block_arm":
         return backend.cmd_block_arm(payload.get("block", True))
+    if action == "set_mode":
+        if not hasattr(backend, "cmd_set_mode"):
+            return {"ok": False, "error": "backend does not support set_mode"}
+        return backend.cmd_set_mode(payload.get("mode", "pose"))
     raise ValueError("unknown action: %r" % action)
 
 
