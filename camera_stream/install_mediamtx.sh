@@ -15,6 +15,8 @@
 #   --version VER   MediaMTX release tag          (default v1.19.3)
 #   --path NAME     RTSP/WebRTC path for the camera (default cam)
 #   --prefix DIR    install location              (default /opt/mediamtx)
+#   --mirror URL    GitHub proxy prefix for the download, tried FIRST
+#                   (default https://git.itedev.com; "" = GitHub direct only)
 #   --no-service    install files but do not install/start systemd
 #   -h | --help     show this help
 #
@@ -27,6 +29,7 @@ set -euo pipefail
 VERSION="${VERSION:-v1.19.3}"
 PATH_NAME="${PATH_NAME:-cam}"
 PREFIX="${PREFIX:-/opt/mediamtx}"
+MIRROR="${MIRROR:-https://git.itedev.com}"   # GitHub proxy prefix ("" to disable)
 INSTALL_SERVICE=1
 SERVICE_NAME="mediamtx.service"
 UNIT_DST="/etc/systemd/system/$SERVICE_NAME"
@@ -42,8 +45,9 @@ while [[ $# -gt 0 ]]; do
     --version)    VERSION="$2"; shift 2 ;;
     --path)       PATH_NAME="$2"; shift 2 ;;
     --prefix)     PREFIX="$2"; shift 2 ;;
+    --mirror)     MIRROR="$2"; shift 2 ;;   # e.g. https://git.itedev.com ("" = off)
     --no-service) INSTALL_SERVICE=0; shift ;;
-    -h|--help)    sed -n '2,30p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help)    sed -n '2,32p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) die "unknown option: $1 (use --help)" ;;
   esac
 done
@@ -59,18 +63,36 @@ case "$ARCH" in
   *) die "unsupported arch: $ARCH" ;;
 esac
 TARBALL="mediamtx_${VERSION}_${MTX_ARCH}.tar.gz"
-URL="https://github.com/bluenviron/mediamtx/releases/download/${VERSION}/${TARBALL}"
+GH_URL="https://github.com/bluenviron/mediamtx/releases/download/${VERSION}/${TARBALL}"
+# Candidate download URLs: mirror proxy FIRST (mainland China can't reach
+# github.com directly), GitHub direct only as a fallback. The mirror is just
+# the GitHub URL prefixed with the mirror domain. Override with --mirror or
+# MIRROR=... ; set MIRROR="" to try GitHub only.
+URLS=()
+[[ -n "$MIRROR" ]] && URLS+=("${MIRROR%/}/$GH_URL")
+URLS+=("$GH_URL")
 
 # ---- 1. download + extract the binary -----------------------------------------
-log "[1/3] Downloading $TARBALL"
 $SUDO mkdir -p "$PREFIX"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-if command -v curl >/dev/null 2>&1; then
-  curl -fsSL "$URL" -o "$TMP/mtx.tar.gz" || die "download failed: $URL"
-else
-  wget -q "$URL" -O "$TMP/mtx.tar.gz" || die "download failed: $URL"
-fi
+dl() {  # dl <url> <out>
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --connect-timeout 10 "$1" -o "$2"
+  else
+    wget -q -T 10 "$1" -O "$2"
+  fi
+}
+GOT=""
+for U in "${URLS[@]}"; do
+  log "[1/3] Downloading $TARBALL"
+  log "      from $U"
+  if dl "$U" "$TMP/mtx.tar.gz" && tar -tzf "$TMP/mtx.tar.gz" >/dev/null 2>&1; then
+    GOT="$U"; ok "downloaded via ${U%%/https*}"; break
+  fi
+  warn "failed: $U"
+done
+[[ -n "$GOT" ]] || die "download failed from all sources (GitHub + mirror). Check network or set --mirror."
 tar -xzf "$TMP/mtx.tar.gz" -C "$TMP"
 [[ -f "$TMP/mediamtx" ]] || die "mediamtx binary not found in tarball"
 $SUDO install -m 0755 "$TMP/mediamtx" "$PREFIX/mediamtx"
