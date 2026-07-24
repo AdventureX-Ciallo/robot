@@ -215,10 +215,61 @@ def test_frontends(mod):
         tcpd.shutdown(); tcpd.server_close()
 
 
+def test_watchdog(mod):
+    print("[watchdog / CAN recovery]")
+    # --- _can_bus_off parses `ip -details link show` output ---
+    class FakeCompleted:
+        def __init__(self, out):
+            self.stdout = out
+
+    orig_run = mod.subprocess.run
+    try:
+        mod.subprocess.run = lambda *a, **k: FakeCompleted("... can state BUS-OFF ...")
+        check("detects BUS-OFF", mod._can_bus_off("can0") is True)
+        mod.subprocess.run = lambda *a, **k: FakeCompleted("... can state ERROR-ACTIVE ...")
+        check("ERROR-ACTIVE not BUS-OFF", mod._can_bus_off("can0") is False)
+        mod.subprocess.run = lambda *a, **k: (_ for _ in ()).throw(OSError("no ip"))
+        check("ip failure -> not BUS-OFF", mod._can_bus_off("can0") is False)
+    finally:
+        mod.subprocess.run = orig_run
+
+    # --- recover_can issues down/bitrate+restart/up and confirms recovery ---
+    calls = []
+    def fake_run_ok(cmd, **k):
+        calls.append(cmd)
+        return FakeCompleted("")
+    orig_run = mod.subprocess.run
+    orig_up, orig_off = mod._can_is_up, mod._can_bus_off
+    try:
+        mod.subprocess.run = fake_run_ok
+        mod._can_is_up = lambda iface: True
+        mod._can_bus_off = lambda iface: False   # recovered
+        ok = mod.recover_can("can0", 1000000, log=mod.log)
+        joined = " ".join(" ".join(c) for c in calls)
+        check("recover_can succeeds", ok is True)
+        check("recover issues down", "down" in joined)
+        check("recover sets restart-ms", "restart-ms 100" in joined)
+        check("recover sets bitrate", "bitrate 1000000" in joined)
+        check("recover brings up", " up" in joined or joined.endswith("up"))
+    finally:
+        mod.subprocess.run = orig_run
+        mod._can_is_up, mod._can_bus_off = orig_up, orig_off
+
+    # --- reconnect() rebuilds the SDK link and re-enables ---
+    b = mod.PiperSDKBackend(can_port="can0")
+    old_piper = b.piper
+    b.reconnect()
+    check("reconnect makes new piper instance", b.piper is not old_piper)
+    check("reconnect ConnectPort on new instance",
+          any(c[0] == "ConnectPort" for c in b.piper.calls))
+    check("reconnect re-enables", any(c[0] == "EnableArm" for c in b.piper.calls))
+
+
 def main():
     mod = load_server()
     test_backend_units(mod)
     test_frontends(mod)
+    test_watchdog(mod)
     print("\n=================================")
     print("passed: %d   failed: %d" % (len(PASSED), len(FAILED)))
     for f in FAILED:

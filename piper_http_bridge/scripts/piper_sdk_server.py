@@ -75,6 +75,71 @@ def bring_can_up(iface, bitrate=1000000, log=logging.getLogger("piper_sdk_server
               "Run: sudo ip link set %s up type can bitrate %d", iface, iface, bitrate)
     return False
 
+
+def _can_bus_off(iface):
+    """True if the CAN controller is in BUS-OFF state (symptom of the gs_usb
+    stuck-TX bug: RX keeps counting but no frame can be sent)."""
+    try:
+        out = subprocess.run(["ip", "-details", "link", "show", iface],
+                             capture_output=True, text=True, timeout=5).stdout
+        return "BUS-OFF" in out
+    except Exception:
+        return False
+
+
+def recover_can(iface, bitrate=1000000, log=logging.getLogger("piper_sdk_server")):
+    """Reset a stuck/BUS-OFF CAN interface (down -> set bitrate+restart -> up).
+
+    This is the software equivalent of unplugging/replugging the USB-CAN
+    adapter to clear the gs_usb stuck-transmit condition.
+    """
+    log.warning("recovering CAN interface %s (BUS-OFF / stuck TX) ...", iface)
+    cmds = [
+        ["ip", "link", "set", iface, "down"],
+        ["ip", "link", "set", iface, "type", "can", "bitrate", str(bitrate),
+         "restart-ms", "100"],
+        ["ip", "link", "set", iface, "up"],
+    ]
+    for use_sudo in (False, True):
+        try:
+            for c in cmds:
+                cmd = (["sudo", "-n"] + c) if use_sudo else c
+                subprocess.run(cmd, check=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            continue
+        if _can_is_up(iface) and not _can_bus_off(iface):
+            log.info("CAN interface %s recovered (ERROR-ACTIVE)", iface)
+            return True
+    log.error("CAN interface %s recovery failed", iface)
+    return False
+
+
+def can_watchdog(backend_holder, iface, bitrate=1000000, interval=2.0,
+                 log=logging.getLogger("piper_sdk_server")):
+    """Background thread: watch for BUS-OFF and auto-recover + reconnect.
+
+    `backend_holder` is a dict-like with an optional 'backend' key holding the
+    PiperSDKBackend; after a recovery we reconnect the SDK so the arm keeps
+    listening on the freshly-reset bus.
+    """
+    while True:
+        time.sleep(interval)
+        try:
+            if _can_exists(iface) and _can_is_up(iface) and _can_bus_off(iface):
+                log.warning("watchdog: %s BUS-OFF detected", iface)
+                if recover_can(iface, bitrate, log):
+                    b = backend_holder.get("backend")
+                    if b is not None:
+                        try:
+                            b.reconnect()
+                            log.warning("watchdog: SDK reconnected on %s", iface)
+                        except Exception as e:
+                            log.error("watchdog: SDK reconnect failed: %s", e)
+        except Exception as e:
+            log.error("watchdog error: %s", e)
+
+
 log = logging.getLogger("piper_sdk_server")
 
 try:
@@ -100,17 +165,33 @@ class PiperSDKBackend(object):
         if _Piper is None:
             raise RuntimeError("piper_sdk import failed: %s" % _IMPORT_ERR)
         self._lock = threading.Lock()
+        self.can_port = can_port
         self._default_speed = sc.clamp_speed(default_speed)
         self._enabled = False
-        self.piper = _Piper(can_name=can_port)
+        self._connect()
+        if auto_enable:
+            self.enable_and_wait()
+
+    def _connect(self):
+        self.piper = _Piper(can_name=self.can_port)
         self.piper.ConnectPort()
         # put the arm in CAN position/velocity control mode
         try:
             self.piper.MotionCtrl_2(0x01, 0x01, self._default_speed, 0x00)
         except AttributeError:
             self.piper.ModeCtrl(0x01, 0x01, self._default_speed, 0x00)
-        if auto_enable:
-            self.cmd_enable(True)
+
+    def reconnect(self):
+        """Tear down and re-establish the SDK connection (after a CAN reset)."""
+        with self._lock:
+            try:
+                self.piper.DisconnectPort()
+            except Exception:
+                pass
+            self._connect()
+            self._enabled = False
+        # re-enable the arm on the fresh bus
+        self.enable_and_wait()
 
     # ---- helpers -------------------------------------------------------
     def _set_speed(self, speed):
@@ -280,6 +361,10 @@ def main():
     ap.add_argument("--bitrate", type=int, default=1000000, help="CAN bitrate")
     ap.add_argument("--no-can-init", action="store_true",
                     help="do not auto-bring-up the CAN interface")
+    ap.add_argument("--no-watchdog", action="store_true",
+                    help="disable the BUS-OFF auto-recovery watchdog")
+    ap.add_argument("--watchdog-interval", type=float, default=2.0,
+                    help="watchdog poll interval in seconds (default 2.0)")
     ap.add_argument("--auto-enable", dest="auto_enable", action="store_true",
                     default=True, help="enable the arm on startup (default)")
     ap.add_argument("--no-auto-enable", dest="auto_enable", action="store_false",
@@ -312,6 +397,16 @@ def main():
     # 3. enable the arm straight away (default), so it's ready to move.
     if args.auto_enable:
         backend.enable_and_wait()
+
+    # 4. start the BUS-OFF watchdog (auto-recover from the gs_usb stuck-TX bug).
+    if not args.no_watchdog:
+        holder = {"backend": backend}
+        wd = threading.Thread(target=can_watchdog,
+                              args=(holder, args.can, args.bitrate,
+                                    args.watchdog_interval, log),
+                              daemon=True)
+        wd.start()
+        log.info("CAN watchdog running (interval %.1fs)", args.watchdog_interval)
 
     shutdown = sc.serve(backend, host=args.host,
                         http_port=args.http_port,

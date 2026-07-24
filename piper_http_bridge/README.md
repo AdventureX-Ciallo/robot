@@ -17,12 +17,20 @@ SDK 直连架构（默认）：
         ▼
 ┌──────────────────────────┐
 │ piper_sdk_server.py       │  ← 本包(限位校验 + 单位换算 + 鉴权)
-│  + server_common.py       │
+│  + server_common.py       │     启动时自动激活 CAN + 自动使能机械臂
+│  + CAN 看门狗(自动恢复)    │     检测 BUS-OFF 自动 down/up 恢复并重连
 └─────────┬────────────────┘
           │ piper_sdk (python-can, SocketCAN)
           ▼
        CAN 1Mbps (can0)  →  Piper 机械臂
 ```
+
+**内置健壮性**：
+- 启动自动 `ip link set can0 up type can bitrate 1000000`（`--no-can-init` 关闭）
+- 启动自动使能机械臂（`--no-auto-enable` 关闭）
+- **CAN 看门狗**：gs_usb 适配器有已知「发送卡死」bug（发送几次后 TX buffer 泄漏、
+  进 BUS-OFF)，看门狗每 2s 检测一次，发现 BUS-OFF 就自动 down/up 接口并重连 SDK、
+  重新使能（`--no-watchdog` 关闭，`--watchdog-interval` 调周期）。免去人工拔插适配器。
 
 ROS 桥架构（可选 `--backend ros`）：`客户端 → piper_http_bridge_node.py → ROS topic/service → 官方 piper_ctrl_single_node → CAN`。
 
