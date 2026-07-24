@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Piper 机械臂控制面板</title>
+<style>
+  :root{
+    --bg:#0f1418; --card:#1a2129; --card2:#222b35; --line:#2e3947;
+    --txt:#e6edf3; --dim:#8b98a8; --acc:#3fb950; --acc2:#1f6feb;
+    --warn:#d29922; --danger:#f85149; --key:#2d333b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);
+       font-family:ui-sans-serif,system-ui,"Segoe UI",Roboto,"Microsoft YaHei",sans-serif;
+       -webkit-user-select:none;user-select:none}
+  header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;
+         align-items:center;gap:14px;flex-wrap:wrap}
+  header h1{font-size:18px;margin:0;font-weight:600}
+  .pill{padding:3px 10px;border-radius:20px;font-size:12px;background:var(--card2);
+        border:1px solid var(--line)}
+  .pill.on{background:#12351a;color:var(--acc);border-color:var(--acc)}
+  .pill.off{background:#3a1d1d;color:var(--danger);border-color:var(--danger)}
+  .wrap{display:grid;grid-template-columns:340px 1fr 300px;gap:14px;padding:14px}
+  @media(max-width:1100px){.wrap{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;
+        padding:14px;margin-bottom:14px}
+  .card h2{font-size:13px;margin:0 0 10px;color:var(--dim);text-transform:uppercase;
+           letter-spacing:.5px;font-weight:600}
+  .kbd{display:inline-block;min-width:26px;text-align:center;padding:3px 7px;
+       background:var(--key);border:1px solid var(--line);border-bottom-width:3px;
+       border-radius:6px;font-family:ui-monospace,monospace;font-size:12px;color:var(--txt)}
+  .grid{display:grid;gap:8px}
+  .pad{display:grid;grid-template-columns:repeat(3,56px);grid-auto-rows:48px;gap:8px;
+       justify-content:center}
+  .pad button,.btn{background:var(--card2);color:var(--txt);border:1px solid var(--line);
+       border-radius:8px;font-size:15px;cursor:pointer;transition:.08s}
+  .pad button:hover,.btn:hover{border-color:var(--acc2)}
+  .pad button:active,.btn:active,.btn.press{background:var(--acc2);transform:scale(.96)}
+  .pad .lbl{font-size:10px;color:var(--dim);display:block;margin-top:2px}
+  .btn{padding:10px 14px;font-size:14px}
+  .btn.block{display:block;width:100%;margin-bottom:8px}
+  .btn.green{background:#12351a;border-color:var(--acc);color:var(--acc)}
+  .btn.red{background:#3a1d1d;border-color:var(--danger);color:var(--danger)}
+  .btn.amber{background:#3a2f10;border-color:var(--warn);color:var(--warn)}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .seg{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .seg button{background:var(--card2);border:none;color:var(--dim);padding:8px 12px;
+       cursor:pointer;font-size:13px}
+  .seg button.on{background:var(--acc2);color:#fff}
+  .state{font-family:ui-monospace,monospace;font-size:12px;line-height:1.7;white-space:pre-wrap}
+  .joint{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+  .joint .name{width:52px;font-size:13px;color:var(--dim)}
+  .joint .val{width:70px;font-family:ui-monospace,monospace;font-size:13px;text-align:right}
+  .joint button{flex:1;background:var(--card2);color:var(--txt);border:1px solid var(--line);
+       border-radius:6px;padding:8px 0;cursor:pointer}
+  .joint button:active{background:var(--acc2)}
+  .muted{color:var(--dim);font-size:12px;line-height:1.6}
+  #toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);
+       background:#3a1d1d;border:1px solid var(--danger);color:#ffb3ad;
+       padding:10px 16px;border-radius:8px;font-size:13px;display:none;z-index:99}
+  .legend{display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px;color:var(--dim)}
+  .legend div{display:flex;align-items:center;gap:6px}
+  h3.sub{font-size:12px;color:var(--dim);margin:14px 0 8px;font-weight:600}
+</style>
+</head>
+<body>
+<header>
+  <h1>🦾 Piper 机械臂控制面板</h1>
+  <span id="conn" class="pill">连接中…</span>
+  <span id="en" class="pill">未知</span>
+  <span style="flex:1"></span>
+  <span class="muted">步长</span>
+  <div class="seg" id="stepSeg">
+    <button data-s="S">小</button>
+    <button data-s="M" class="on">中</button>
+    <button data-s="L">大</button>
+  </div>
+</header>
+
+<div class="wrap">
+  <!-- 左：笛卡尔点动 -->
+  <div>
+    <div class="card">
+      <h2>末端点动（夹爪 = 有方向的质点）</h2>
+      <h3 class="sub">平移</h3>
+      <div class="pad" style="grid-template-columns:repeat(3,72px)">
+        <span></span><button data-jog="dx:+1"><span class="kbd">W</span><span class="lbl">前 +X</span></button><span></span>
+        <button data-jog="dy:+1"><span class="kbd">A</span><span class="lbl">左 +Y</span></button>
+        <button data-jog="dx:-1"><span class="kbd">S</span><span class="lbl">后 −X</span></button>
+        <button data-jog="dy:-1"><span class="kbd">D</span><span class="lbl">右 −Y</span></button>
+        <button data-jog="dz:+1"><span class="kbd">Q</span><span class="lbl">上 +Z</span></button>
+        <span></span>
+        <button data-jog="dz:-1"><span class="kbd">E</span><span class="lbl">下 −Z</span></button>
+      </div>
+      <h3 class="sub">旋转</h3>
+      <div class="pad" style="grid-template-columns:repeat(3,72px)">
+        <button data-jog="droll:+1"><span class="kbd">X</span><span class="lbl">滚转 +</span></button>
+        <button data-jog="dpitch:+1"><span class="kbd">C</span><span class="lbl">俯仰 +</span></button>
+        <button data-jog="dyaw:+1"><span class="kbd">R</span><span class="lbl">偏航 +</span></button>
+        <button data-jog="droll:-1"><span class="kbd">Z</span><span class="lbl">滚转 −</span></button>
+        <button data-jog="dpitch:-1"><span class="kbd">V</span><span class="lbl">俯仰 −</span></button>
+        <button data-jog="dyaw:-1"><span class="kbd">F</span><span class="lbl">偏航 −</span></button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>夹爪</h2>
+      <div class="row">
+        <button class="btn" id="gClose" style="flex:1"><span class="kbd">G</span> 合抓</button>
+        <button class="btn" id="gOpen" style="flex:1"><span class="kbd">H</span> 放开</button>
+      </div>
+      <input type="range" id="grip" min="0" max="80" value="0" style="width:100%">
+      <div class="muted" style="text-align:center"><span id="gripVal">0</span> mm</div>
+    </div>
+  </div>
+
+  <!-- 中：状态 + 模式 -->
+  <div>
+    <div class="card">
+      <h2>模式 / 安全</h2>
+      <button class="btn block green" id="btnEnable">使能 (Enter)</button>
+      <button class="btn block amber" id="btnZero">回零位</button>
+      <button class="btn block" id="btnDisable">失能</button>
+      <button class="btn block red" id="btnStop">⛔ 急停 (Space)</button>
+    </div>
+    <div class="card">
+      <h2>实时状态</h2>
+      <div class="state" id="state">—</div>
+    </div>
+  </div>
+
+  <!-- 右：关节点动 + 说明 -->
+  <div>
+    <div class="card">
+      <h2>按轴点动（关节）</h2>
+      <div id="joints"></div>
+    </div>
+    <div class="card">
+      <h2>按键说明</h2>
+      <div class="legend">
+        <div><span class="kbd">W</span>/<span class="kbd">S</span> 前/后</div>
+        <div><span class="kbd">A</span>/<span class="kbd">D</span> 左/右</div>
+        <div><span class="kbd">Q</span>/<span class="kbd">E</span> 上/下</div>
+        <div><span class="kbd">X</span>/<span class="kbd">Z</span> 滚转±</div>
+        <div><span class="kbd">C</span>/<span class="kbd">V</span> 俯仰±</div>
+        <div><span class="kbd">R</span>/<span class="kbd">F</span> 偏航±</div>
+        <div><span class="kbd">G</span> 合抓</div>
+        <div><span class="kbd">H</span> 放开</div>
+        <div><span class="kbd">Space</span> 急停</div>
+        <div><span class="kbd">Enter</span> 使能</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+let stepSize = "M";
+const TRANS = {S:0.005, M:0.02, L:0.05};
+const ROT   = {S:2, M:5, L:15};
+const JSTEP = {S:1, M:3, L:10};
+const GRIP  = {S:2, M:10, L:40};
+
+let lastState = null;
+let gripPos = 0;
+
+// ---------- API ----------
+async function api(path, payload){
+  try{
+    const opt = payload ? {method:"POST",headers:{"Content-Type":"application/json"},
+                           body:JSON.stringify(payload)} : {};
+    const r = await fetch(path, opt);
+    return await r.json();
+  }catch(e){ return {ok:false, error:String(e)}; }
+}
+function toast(msg){
+  const t = $("#toast"); t.textContent = msg; t.style.display="block";
+  clearTimeout(t._h); t._h = setTimeout(()=>t.style.display="none", 2500);
+}
+async function doCmd(payload){
+  const r = await api("/api/"+payload.action, payload) ;
+  if(r && r.ok===false) toast(r.error || "命令失败");
+  refresh();
+  return r;
+}
+
+// ---------- 点动 ----------
+// dir: {axis: +1/-1}
+function jog(d){ doCmd(Object.assign({action:"jog"}, d)); }
+
+const JOGMAP = {
+  w:{dx:+1}, s:{dx:-1}, a:{dy:+1}, d:{dy:-1}, q:{dz:+1}, e:{dz:-1},
+  x:{droll:+1}, z:{droll:-1}, c:{dpitch:+1}, v:{dpitch:-1},
+  r:{dyaw:+1}, f:{dyaw:-1},
+};
+function jogScaled(spec){
+  const d = {};
+  for(const k in spec){
+    const v = spec[k];
+    if(k==="dx"||k==="dy"||k==="dz") d[k]= v*TRANS[stepSize];
+    else d[k]= v*ROT[stepSize];
+  }
+  jog(d);
+}
+
+// 点击按钮
+document.querySelectorAll("[data-jog]").forEach(b=>{
+  b.addEventListener("click", ()=>{
+    const [axis,sign] = b.dataset.jog.split(":");
+    jogScaled({[axis]: Number(sign)});
+  });
+});
+
+// ---------- 夹爪 ----------
+function gripTo(mm){ gripPos=Math.max(0,Math.min(80,mm));
+  $("#grip").value=gripPos; $("#gripVal").textContent=Math.round(gripPos);
+  doCmd({action:"gripper", position_mm:gripPos}); }
+$("#gOpen").onclick = ()=> gripTo(gripPos + GRIP[stepSize]);
+$("#gClose").onclick= ()=> gripTo(gripPos - GRIP[stepSize]);
+$("#grip").addEventListener("change", e=> gripTo(Number(e.target.value)));
+$("#grip").addEventListener("input", e=> $("#gripVal").textContent=e.target.value);
+
+// ---------- 模式 ----------
+$("#btnEnable").onclick = ()=> doCmd({action:"enable"});
+$("#btnDisable").onclick= ()=> doCmd({action:"disable"});
+$("#btnStop").onclick   = ()=> doCmd({action:"stop"});
+$("#btnZero").onclick   = ()=> doCmd({action:"go_zero"});
+
+// ---------- 关节点动 ----------
+const JOINT_NAMES=["J1","J2","J3","J4","J5","J6"];
+function buildJoints(){
+  const box=$("#joints"); box.innerHTML="";
+  JOINT_NAMES.forEach((n,i)=>{
+    const row=document.createElement("div"); row.className="joint";
+    row.innerHTML=`<span class="name">${n}</span>
+      <button data-j="${i}" data-d="-1">−</button>
+      <span class="val" id="jv${i}">—</span>
+      <button data-j="${i}" data-d="+1">+</button>`;
+    box.appendChild(row);
+  });
+  box.querySelectorAll("button").forEach(b=>{
+    b.addEventListener("click", ()=>{
+      doCmd({action:"joint_jog", index:Number(b.dataset.j),
+             delta: Number(b.dataset.d)*JSTEP[stepSize]});
+    });
+  });
+}
+buildJoints();
+
+// ---------- 键盘 ----------
+const held = new Set();
+document.addEventListener("keydown", e=>{
+  if(e.repeat) return;
+  const k = e.key.toLowerCase();
+  if(k===" "){ e.preventDefault(); doCmd({action:"stop"}); flash($("#btnStop")); return; }
+  if(k==="enter"){ doCmd({action:"enable"}); flash($("#btnEnable")); return; }
+  if(k==="g"){ gripTo(gripPos - GRIP[stepSize]); return; }
+  if(k==="h"){ gripTo(gripPos + GRIP[stepSize]); return; }
+  if(JOGMAP[k]){ jogScaled(JOGMAP[k]); held.add(k); }
+});
+document.addEventListener("keyup", e=> held.delete(e.key.toLowerCase()));
+
+function flash(el){ el.classList.add("press"); setTimeout(()=>el.classList.remove("press"),150); }
+
+// ---------- 步长 ----------
+$("#stepSeg").querySelectorAll("button").forEach(b=>{
+  b.onclick=()=>{ stepSize=b.dataset.s;
+    $("#stepSeg").querySelectorAll("button").forEach(x=>x.classList.toggle("on",x===b)); };
+});
+
+// ---------- 状态轮询 ----------
+function fmt(v,d=2){ return (v===null||v===undefined)?"—":Number(v).toFixed(d); }
+async function refresh(){
+  const r = await api("/api/state");
+  const conn=$("#conn"), en=$("#en");
+  if(!r.ok){ conn.textContent="未连接"; conn.className="pill off"; return; }
+  conn.textContent="已连接"; conn.className="pill on";
+  const s = r.state||{}; lastState=s;
+  en.textContent = s.enabled? "已使能":"未使能";
+  en.className = "pill "+(s.enabled?"on":"off");
+  const j = s.joints_deg||[]; const p = s.end_pose||{};
+  j.forEach((v,i)=>{ const el=$("#jv"+i); if(el) el.textContent=fmt(v,1)+"°"; });
+  if(typeof s.gripper_mm==="number"){ gripPos=s.gripper_mm;
+    $("#grip").value=gripPos; $("#gripVal").textContent=Math.round(gripPos); }
+  $("#state").textContent =
+`关节(°)  ${j.map(v=>fmt(v,1)).join("  ")}
+末端位置 X ${fmt(p.x,1)}  Y ${fmt(p.y,1)}  Z ${fmt(p.z,1)}  mm
+末端姿态 R ${fmt(p.roll,1)}  P ${fmt(p.pitch,1)}  Y ${fmt(p.yaw,1)}  °
+夹爪     ${fmt(s.gripper_mm,1)} mm
+状态码   ctrl=${s.arm_status?s.arm_status.ctrl_mode:"—"}  err=${s.arm_status?s.arm_status.err_code:"—"}`;
+}
+refresh();
+setInterval(refresh, 800);
+</script>
+</body>
+</html>
