@@ -23,9 +23,9 @@
 #   --tcp-port N        TCP control port                 (default 9090)
 #   --speed N           default arm speed %% 1-100        (default 50)
 #   --workspace DIR     (ros backend) catkin workspace   (default ~/piper_ros_ws)
-#   --auto-enable       enable the arm as soon as the server starts
+#   --no-auto-enable    do NOT auto-enable the arm on startup (default: it does)
 #   --no-service        install but do not install/start systemd
-#   --no-can            skip CAN bring-up (manage the interface yourself)
+#   --no-can            skip CAN bring-up (the server also brings can0 up itself)
 #   -h | --help         show this help
 ###############################################################################
 set -euo pipefail
@@ -50,7 +50,7 @@ PKG_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # the package dir
 PKG_NAME="piper_http_bridge"
 SERVICE_NAME="piper-bridge.service"
 UNIT_DST="/etc/systemd/system/$SERVICE_NAME"
-RUN_USER="${SUDO_USER:-$USER}"
+RUN_USER="${SUDO_USER:-${USER:-$(id -un 2>/dev/null || echo root)}}"
 
 log()  { printf '\033[1;34m[install]\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m[ ok ]\033[0m %s\n' "$*"; }
@@ -71,7 +71,7 @@ while [[ $# -gt 0 ]]; do
     --http-port)   HTTP_PORT="$2"; shift 2 ;;
     --tcp-port)    TCP_PORT="$2"; shift 2 ;;
     --speed)       SPEED="$2"; shift 2 ;;
-    --auto-enable) AUTO_ENABLE=1; shift ;;
+    --no-auto-enable) AUTO_ENABLE=0; shift ;;
     --no-service)  INSTALL_SERVICE=0; shift ;;
     --no-can)      DO_CAN=0; shift ;;
     -h|--help)     sed -n '2,32p' "${BASH_SOURCE[0]}"; exit 0 ;;
@@ -161,7 +161,7 @@ fi
 
 # ---- 4. systemd service --------------------------------------------------------
 AUTO_ARG=""
-[[ "$AUTO_ENABLE" -eq 1 ]] && AUTO_ARG="--auto-enable"
+[[ "$AUTO_ENABLE" -eq 0 ]] && AUTO_ARG="--no-auto-enable"
 if [[ "$INSTALL_SERVICE" -eq 1 ]]; then
   log "[4/4] Installing + starting systemd unit ($SERVICE_NAME) ..."
   UNIT="$(mktemp)"
@@ -174,10 +174,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=$RUN_USER
-Group=$RUN_USER
-ExecStartPre=/bin/bash -c 'ip link show $CAN_IF 2>/dev/null | grep -q UP || ip link set $CAN_IF up type can bitrate $CAN_BITRATE || true'
-ExecStart=/usr/bin/python3 $PKG_SRC/scripts/piper_sdk_server.py --can $CAN_IF --host 0.0.0.0 --http-port $HTTP_PORT --tcp-port $TCP_PORT --speed $SPEED ${TOKEN:+--token $TOKEN} $AUTO_ARG
+# run as root so the server can bring the CAN interface up itself (needs
+# CAP_NET_ADMIN). The server auto-raises can0 and auto-enables the arm.
+User=root
+Group=root
+ExecStart=/usr/bin/python3 $PKG_SRC/scripts/piper_sdk_server.py --can $CAN_IF --bitrate $CAN_BITRATE --host 0.0.0.0 --http-port $HTTP_PORT --tcp-port $TCP_PORT --speed $SPEED ${TOKEN:+--token $TOKEN} $AUTO_ARG
 Restart=on-failure
 RestartSec=3
 TimeoutStartSec=60

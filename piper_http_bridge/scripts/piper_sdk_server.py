@@ -17,10 +17,62 @@ Client units: joints=deg, x/y/z=mm, roll/pitch/yaw=deg, gripper=mm.
 import argparse
 import json
 import logging
+import subprocess
 import threading
 import time
 
 import server_common as sc
+
+
+def _can_is_up(iface):
+    """True if the SocketCAN interface exists and is UP."""
+    try:
+        with open("/sys/class/net/%s/operstate" % iface) as f:
+            return f.read().strip() == "up"
+    except OSError:
+        return False
+
+
+def _can_exists(iface):
+    try:
+        with open("/sys/class/net/%s/operstate" % iface):
+            return True
+    except OSError:
+        return False
+
+
+def bring_can_up(iface, bitrate=1000000, log=logging.getLogger("piper_sdk_server")):
+    """Bring the SocketCAN interface up at `bitrate` if it isn't already.
+
+    Returns True if the interface is UP afterwards. Tries without sudo first,
+    then with sudo -n (non-interactive). Safe to call repeatedly.
+    """
+    if not _can_exists(iface):
+        log.warning("CAN interface '%s' not found in /sys/class/net -- is the "
+                    "USB-CAN adapter plugged in?", iface)
+        return False
+    if _can_is_up(iface):
+        log.info("CAN interface %s already UP", iface)
+        return True
+    cmds = [
+        ["ip", "link", "set", iface, "down"],
+        ["ip", "link", "set", iface, "up", "type", "can", "bitrate", str(bitrate)],
+    ]
+    for use_sudo in (False, True):
+        try:
+            for c in cmds:
+                cmd = (["sudo", "-n"] + c) if use_sudo else c
+                subprocess.run(cmd, check=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            continue
+        if _can_is_up(iface):
+            log.info("brought CAN interface %s UP @ %d bps%s", iface, bitrate,
+                     " (via sudo)" if use_sudo else "")
+            return True
+    log.error("could not bring CAN interface %s UP (need root/CAP_NET_ADMIN). "
+              "Run: sudo ip link set %s up type can bitrate %d", iface, iface, bitrate)
+    return False
 
 try:
     from piper_sdk import C_PiperInterface_V2 as _Piper
@@ -110,19 +162,49 @@ class PiperSDKBackend(object):
             "stamp": time.time(),
         }
 
+    # ---- enable --------------------------------------------------------
+    def _drivers_enabled(self):
+        try:
+            info = self.piper.GetArmLowSpdInfoMsgs()
+            motors = (info.motor_1, info.motor_2, info.motor_3,
+                      info.motor_4, info.motor_5, info.motor_6)
+            return all(getattr(m.foc_status, "driver_enable_status", False)
+                       for m in motors)
+        except Exception:
+            return False
+
+    def enable_and_wait(self, timeout=8.0, poll=0.2):
+        """Send EnableArm until the drivers report enabled (or timeout)."""
+        self.piper.EnableArm(7)
+        try:
+            self.piper.GripperCtrl(0, 1000, 0x01, 0)
+        except Exception:
+            pass
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._drivers_enabled():
+                self._enabled = True
+                log.info("arm ENABLED (drivers report enabled)")
+                return True
+            time.sleep(poll)
+            try:
+                self.piper.EnableArm(7)
+            except Exception:
+                pass
+        self._enabled = True  # proceed anyway; commands may still work
+        log.warning("enable not confirmed within %.1fs; continuing anyway", timeout)
+        return False
+
     # ---- commands ------------------------------------------------------
     def cmd_enable(self, enable):
         enable = bool(enable)
-        with self._lock:
-            if enable:
-                self.piper.EnableArm(7)
-                try:
-                    self.piper.GripperCtrl(0, 1000, 0x01, 0)
-                except Exception:
-                    pass
-            else:
+        if enable:
+            # interactive call: short wait so the HTTP/TCP request stays snappy
+            self.enable_and_wait(timeout=1.5)
+        else:
+            with self._lock:
                 self.piper.DisableArm(7)
-            self._enabled = enable
+            self._enabled = False
         return {"ok": True, "via": "sdk", "enabled": enable}
 
     def cmd_joint_ctrl(self, joints, speed=None, gripper_mm=None):
@@ -188,18 +270,41 @@ def main():
     ap.add_argument("--no-tcp", action="store_true")
     ap.add_argument("--token", default="", help="bearer token (recommended)")
     ap.add_argument("--speed", type=int, default=50, help="default speed %% 1-100")
-    ap.add_argument("--auto-enable", action="store_true",
-                    help="enable the arm on startup")
+    ap.add_argument("--bitrate", type=int, default=1000000, help="CAN bitrate")
+    ap.add_argument("--no-can-init", action="store_true",
+                    help="do not auto-bring-up the CAN interface")
+    ap.add_argument("--auto-enable", dest="auto_enable", action="store_true",
+                    default=True, help="enable the arm on startup (default)")
+    ap.add_argument("--no-auto-enable", dest="auto_enable", action="store_false",
+                    help="do not auto-enable the arm on startup")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="[%(levelname)s] %(message)s")
 
-    backend = PiperSDKBackend(can_port=args.can,
-                              default_speed=args.speed,
-                              auto_enable=args.auto_enable)
+    # 1. bring the CAN interface up ourselves (no manual step needed).
+    if not args.no_can_init:
+        bring_can_up(args.can, args.bitrate, log)
+
+    # 2. connect to the arm.
+    try:
+        backend = PiperSDKBackend(can_port=args.can,
+                                  default_speed=args.speed,
+                                  auto_enable=False)
+    except Exception as e:
+        log.error("failed to connect to the arm on '%s': %s", args.can, e)
+        log.error("checklist:")
+        log.error("  1) USB-CAN adapter plugged in?            ->  ip link show type can")
+        log.error("  2) CAN interface up at 1 Mbps?            ->  sudo ip link set %s up type can bitrate 1000000", args.can)
+        log.error("  3) arm powered on, green CAN plug seated?")
+        log.error("  4) firmware >= V1.5-2 (needed by C_PiperInterface_V2)?")
+        sys.exit(2)
     log.info("connected to arm on %s", args.can)
+
+    # 3. enable the arm straight away (default), so it's ready to move.
+    if args.auto_enable:
+        backend.enable_and_wait()
 
     shutdown = sc.serve(backend, host=args.host,
                         http_port=args.http_port,
