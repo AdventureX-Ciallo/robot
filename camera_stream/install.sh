@@ -120,8 +120,12 @@ fi
 # ---- 3. MediaMTX WebRTC gateway (optional) --------------------------------------
 if [[ "$MEDIAMTX" -eq 1 ]]; then
   log "[3/4] Installing MediaMTX WebRTC gateway ..."
+  # MediaMTX path MUST match the last segment of the RTSP push URL, or the
+  # WHEP endpoint the browser hits (/path/whep) won't exist -> 404.
   PATH_NAME="$(printf '%s' "$RTSP_URL" | sed -n 's#.*/\([^/]*\)$#\1#p')"
   PATH_NAME="${PATH_NAME:-cam}"
+  [[ -z "$RTSP_URL" ]] && die "--mediamtx needs --rtsp-url rtsp://.../$PATH_NAME (the path MediaMTX serves)"
+  log "      MediaMTX path = /$PATH_NAME (browser WHEP: http://<ip>:8889/$PATH_NAME/whep)"
   bash "$PKG_SRC/install_mediamtx.sh" --path "$PATH_NAME" \
     $([[ "$INSTALL_SERVICE" -eq 0 ]] && echo --no-service)
 else

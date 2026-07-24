@@ -153,15 +153,42 @@ else
 fi
 
 IP_ADDR="$(hostname -I 2>/dev/null | awk '{print $1}')"; IP_ADDR="${IP_ADDR:-<orangepi-ip>}"
+
+# ---- self-check: is the WHEP endpoint the browser hits actually there? ----------
+# The panel POSTs an SDP offer to http://<ip>:8889/<path>/whep. If MediaMTX is
+# too old (pre-WHEP) or the path name doesn't match, that URL 404s even though
+# the CORS preflight (OPTIONS) succeeds. Probe it and report what we find.
+WHEP_URL="http://127.0.0.1:8889/$PATH_NAME/whep"
+log "self-check: probing WHEP endpoint $WHEP_URL"
+PROBE_CODE=""
+if command -v curl >/dev/null 2>&1; then
+  # POST with no body: WHEP-capable MediaMTX answers 400 (bad request) which
+  # proves the endpoint exists; 404 means wrong path or no WHEP support.
+  PROBE_CODE="$(curl -s -o /dev/null -w '%{http_code}' -X OPTIONS "$WHEP_URL" || true)"
+  POST_CODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$WHEP_URL" || true)"
+  log "  OPTIONS -> ${PROBE_CODE:-?}   POST(no sdp) -> ${POST_CODE:-?}"
+  case "${POST_CODE:-}" in
+    400|401|405) ok "WHEP endpoint exists on /$PATH_NAME" ;;
+    000) warn "cannot reach 127.0.0.1:8889 -- mediamtx WebRTC listener down?" ;;
+    404) warn "WHEP 404: path '/$PATH_NAME' not served OR mediamtx too old for WHEP."
+         warn "  -> keep push path and play path identical, and use mediamtx >= v1.0 (WHEP)." ;;
+    *)   warn "WHEP POST returned ${POST_CODE} (expected 400 for a bodyless offer)" ;;
+  esac
+fi
+
 cat <<EOF
 
 $(printf '\033[1;32m')============ mediamtx install complete ============$(printf '\033[0m')
   WebRTC viewer : http://$IP_ADDR:8889/$PATH_NAME
+  WHEP (panel)  : http://$IP_ADDR:8889/$PATH_NAME/whep
   RTSP (push)   : rtsp://$IP_ADDR:8554/$PATH_NAME
 
-  Now point the camera daemon at it (H.264 -> WebRTC):
-    ./camera_stream/install.sh --input-format h264 \\
-        --rtsp-url rtsp://127.0.0.1:8554/$PATH_NAME
+  Set the panel to the SAME path (note: use the Pi's LAN IP, not 127.0.0.1):
+    --camera-webrtc http://$IP_ADDR:8889/$PATH_NAME
+
+  Point the camera daemon at it (H.264 -> WebRTC):
+    ./camera_stream/install.sh --input-format mjpeg \\
+        --rtsp-url rtsp://127.0.0.1:8554/$PATH_NAME --mediamtx
 
   Manage:
     sudo systemctl status $SERVICE_NAME
