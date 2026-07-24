@@ -19,6 +19,28 @@ python3 piper_controller.py --endpoint http://192.168.1.100:8080 --token 你的�
 
 然后浏览器打开 **`http://localhost:8000/`**（或这台上位机的 IP:8000）。
 
+## 本机摄像头采集训练集
+
+如果摄像头模组直接插在电脑上，不需要走 `camera_stream`。直接启动面板：
+
+```bash
+python piper_controller.py \
+  --endpoint http://10.80.12.142:8080 \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --speed 10 \
+  --capture-dir D:/Documents/Projects/AGILE/datasets/mahjong_raw/images
+```
+
+浏览器打开 `http://127.0.0.1:8000/` 后：
+
+1. 允许摄像头权限。
+2. 在摄像头下拉框选择外接模组。
+3. 另一个同学缓慢移动机械臂/摄像头视角。
+4. 每按一次 `Space`，面板保存当前画面到 `--capture-dir`。
+
+该流程适合人工控制采集节奏，避免批量脚本在视角没变时连续保存大量重复图片。
+
 ## 键盘操作（焦点在网页上）
 
 | 按键 | 动作 | 按键 | 动作 |

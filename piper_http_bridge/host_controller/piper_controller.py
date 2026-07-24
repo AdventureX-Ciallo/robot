@@ -64,7 +64,7 @@ import piper_client as pc  # noqa: E402
 class Controller(object):
     """Holds endpoint client + cached state; applies jogs safely."""
 
-    def __init__(self, endpoint, token="", speed=30):
+    def __init__(self, endpoint, token="", speed=30, capture_dir=""):
         self.ep = endpoint.rstrip("/")
         # parse host/port for piper_client
         hostport = self.ep.split("://", 1)[-1].split("/")[0]
@@ -75,6 +75,8 @@ class Controller(object):
             host, port = hostport, 8080
         self.client = pc.PiperClient(host, http_port=port, token=token)
         self.speed = speed
+        self.capture_dir = capture_dir
+        self._capture_count = 0
         self._last_joints = None     # last commanded joints (base for jog deltas)
         self._lock = threading.Lock()
 
@@ -128,6 +130,28 @@ class Controller(object):
 
     def go_zero(self):
         return self.client.go_zero()
+
+    def save_capture(self, data_url, prefix="mahjong"):
+        if not self.capture_dir:
+            raise pc.PiperError("capture directory is not configured")
+        if not isinstance(data_url, str) or "," not in data_url:
+            raise pc.PiperError("capture data must be a data URL")
+        meta, b64 = data_url.split(",", 1)
+        if "image/jpeg" not in meta and "image/png" not in meta:
+            raise pc.PiperError("capture data must be image/jpeg or image/png")
+        os.makedirs(self.capture_dir, exist_ok=True)
+        with self._lock:
+            self._capture_count += 1
+            idx = self._capture_count
+        ext = ".jpg" if "image/jpeg" in meta else ".png"
+        safe_prefix = "".join(ch for ch in str(prefix) if ch.isalnum() or ch in "-_")
+        if not safe_prefix:
+            safe_prefix = "mahjong"
+        path = os.path.join(self.capture_dir, "%s_%06d%s" %
+                            (safe_prefix, idx, ext))
+        with open(path, "wb") as f:
+            f.write(base64.b64decode(b64))
+        return {"ok": True, "path": path, "index": idx}
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +415,9 @@ def make_handler(ctrl, panel_html, hub=None):
                 return {"ok": True, "r": ctrl.stop()}
             if a == "go_zero":
                 return {"ok": True, "r": ctrl.go_zero()}
+            if a == "capture_frame":
+                return ctrl.save_capture(p.get("data_url", ""),
+                                         p.get("prefix", "mahjong"))
             return {"ok": False, "error": "unknown action %r" % a}
 
     return Handler
@@ -413,6 +440,9 @@ def main():
                          "panel streams video over WebRTC instead of MJPEG.")
     ap.add_argument("--ws-rate", type=float, default=10.0,
                     help="WebSocket state push rate in Hz (default 10)")
+    ap.add_argument("--capture-dir",
+                    default="D:/Documents/Projects/AGILE/datasets/mahjong_raw/images",
+                    help="directory where browser camera captures are saved")
     args = ap.parse_args()
 
     panel_path = os.path.join(HERE, "panel.html")
@@ -422,7 +452,8 @@ def main():
     panel_html = panel_html.replace("__CAMERA_URL__", args.camera)
     panel_html = panel_html.replace("__CAMERA_WEBRTC_URL__", args.camera_webrtc)
 
-    ctrl = Controller(args.endpoint, token=args.token, speed=args.speed)
+    ctrl = Controller(args.endpoint, token=args.token, speed=args.speed,
+                      capture_dir=args.capture_dir)
     hub = WSHub(ctrl, hz=args.ws_rate)
     httpd = ThreadingHTTPServer((args.host, args.port),
                                 make_handler(ctrl, panel_html, hub))
@@ -435,6 +466,7 @@ def main():
         print("  camera   : %s" % (args.camera_webrtc
                                    and ("%s (WebRTC)" % args.camera_webrtc)
                                    or args.camera))
+    print("  captures : %s" % args.capture_dir)
     print("  open that URL in a browser, then use WASD/QE/XZ/G/H to drive the arm.")
     try:
         httpd.serve_forever()

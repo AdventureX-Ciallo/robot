@@ -136,6 +136,19 @@ python ./robot/camera_stream/scripts/capture_snapshots.py \
     --token 你的密钥
 ```
 
+如果摄像头直接插在电脑上，也可以用 OpenCV 从本机摄像头采集：
+
+```bash
+python ./robot/camera_stream/scripts/capture_local_camera.py --list
+
+python ./robot/camera_stream/scripts/capture_local_camera.py \
+    --camera 0 \
+    --out ./datasets/mahjong_raw/images \
+    --count 300 \
+    --fps 1 \
+    --preview
+```
+
 ---
 
 ## 三、低延迟直播（WebRTC，亚秒级）

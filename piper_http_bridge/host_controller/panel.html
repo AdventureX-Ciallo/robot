@@ -116,8 +116,12 @@
       <video id="camRtc" autoplay muted playsinline style="display:none"></video>
       <img id="cam" alt="camera stream">
       <div class="muted" style="margin-top:6px">
+        <button class="btn" id="camLocal" style="display:none;margin-right:8px">启用本机摄像头</button>
+        <button class="btn green" id="camCapture" style="display:none;margin-right:8px">拍照 <span class="kbd">Space</span></button>
+        <select id="camSelect" style="display:none;background:var(--card2);color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:8px;margin-right:8px;max-width:220px"></select>
         <a id="camOpen" href="#" target="_blank" rel="noopener" style="color:#7db4ff">新窗口打开</a>
       </div>
+      <div class="muted" id="camCaptureInfo" style="margin-top:6px">空格键保存当前画面到训练集目录</div>
     </div>
     <div class="card">
       <h2>模式 / 安全</h2>
@@ -342,8 +346,31 @@ const JOINT_KEY=[["1","2"],["3","4"],["5","6"],["7","8"],["9","0"],["-","="]];
 // 低延迟首选 WebRTC(MediaMTX WHEP);未配置则用 MJPEG <img> 兜底。
 (function initCam(){
   const card=$("#camCard"), img=$("#cam"), vid=$("#camRtc"),
-        mode=$("#camMode"), open=$("#camOpen");
-  if(!CAMERA_RTC_URL && !CAMERA_URL){ return; }        // 都没配 -> 隐藏卡片
+        mode=$("#camMode"), open=$("#camOpen"), localBtn=$("#camLocal"),
+        camSelect=$("#camSelect"), captureBtn=$("#camCapture"),
+        captureInfo=$("#camCaptureInfo");
+  let captureCount = 0;
+  if(!CAMERA_RTC_URL && !CAMERA_URL){
+    card.style.display="block";
+    mode.textContent = "本机摄像头";
+    img.style.display="none"; vid.style.display="block";
+    open.style.display="none";
+    localBtn.style.display="inline-block";
+    localBtn.onclick = () => startLocalCamera();
+    camSelect.onchange = () => startLocalCamera(camSelect.value);
+    captureBtn.onclick = captureCurrentFrame;
+    document.addEventListener("keydown", ev => {
+      const tag = (ev.target && ev.target.tagName || "").toLowerCase();
+      if(ev.code === "Space" && !ev.repeat && !["input","textarea","select","button"].includes(tag)){
+        ev.preventDefault();
+        captureCurrentFrame();
+      }
+    });
+    // localhost / 127.0.0.1 通常允许直接访问摄像头；如果浏览器拦截，
+    // 用户点击按钮后会触发权限请求。
+    startLocalCamera().catch(()=>{});
+    return;
+  }
   card.style.display="block";
 
   if(CAMERA_RTC_URL){
@@ -354,6 +381,81 @@ const JOINT_KEY=[["1","2"],["3","4"],["5","6"],["7","8"],["9","0"],["-","="]];
     mode.textContent = "MJPEG";
     img.style.display="block"; vid.style.display="none";
     img.src = CAMERA_URL; open.href = CAMERA_URL;
+  }
+
+  async function refreshCameraChoices(){
+    if(!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+    try{
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const cams = devices.filter(d => d.kind === "videoinput");
+      camSelect.innerHTML = "";
+      cams.forEach((d, i) => {
+        const opt = document.createElement("option");
+        opt.value = d.deviceId;
+        opt.textContent = d.label || ("摄像头 " + (i + 1));
+        camSelect.appendChild(opt);
+      });
+      if(cams.length > 1) camSelect.style.display = "inline-block";
+    }catch(e){}
+  }
+
+  async function startLocalCamera(deviceId){
+    if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+      mode.textContent = "浏览器不支持本机摄像头";
+      return;
+    }
+    try{
+      if(vid.srcObject){
+        vid.srcObject.getTracks().forEach(t => t.stop());
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: deviceId ? { deviceId: {exact: deviceId}, width: {ideal: 1280}, height: {ideal: 720} }
+                        : { width: {ideal: 1280}, height: {ideal: 720}, facingMode: "environment" },
+        audio: false
+      });
+      vid.srcObject = stream;
+      vid.style.display="block"; img.style.display="none";
+      mode.textContent = "本机摄像头 · live";
+      localBtn.style.display="none";
+      captureBtn.style.display="inline-block";
+      await refreshCameraChoices();
+      const track = stream.getVideoTracks()[0];
+      if(track && track.getSettings && track.getSettings().deviceId){
+        camSelect.value = track.getSettings().deviceId;
+      }
+    }catch(e){
+      mode.textContent = "等待摄像头权限";
+      localBtn.style.display="inline-block";
+      toast("浏览器需要允许摄像头权限");
+      throw e;
+    }
+  }
+
+  async function captureCurrentFrame(){
+    if(!vid.srcObject || !vid.videoWidth || !vid.videoHeight){
+      toast("摄像头还没有画面");
+      return;
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = vid.videoWidth;
+    canvas.height = vid.videoHeight;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(vid, 0, 0, canvas.width, canvas.height);
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+    captureBtn.disabled = true;
+    const r = await api("/api/capture_frame", {
+      action: "capture_frame",
+      data_url: dataUrl,
+      prefix: "mahjong"
+    });
+    captureBtn.disabled = false;
+    if(r && r.ok){
+      captureCount += 1;
+      captureInfo.textContent = "已保存 " + captureCount + " 张 · " + (r.path || "");
+      toast("已保存第 " + captureCount + " 张");
+    }else{
+      toast((r && r.error) || "保存失败");
+    }
   }
 
   async function startWhep(whepUrl, video, imgEl, modeEl){
