@@ -368,6 +368,8 @@ class CameraBackend(object):
         The push blocks until ffmpeg exits (MediaMTX not up yet, camera
         hiccup, unplug), then retries with the same backoff as the MJPEG pipe.
         No frame parsing here -- MediaMTX/WebRTC own the H.264 path end to end.
+        ffmpeg's stderr is drained and logged so a push that fails to start
+        (bad encoder, device busy, MediaMTX down) shows up in the journal.
         """
         backoff = 1.0
         while not self._stop:
@@ -383,6 +385,14 @@ class CameraBackend(object):
                     self._h264_proc = proc
                 while not self._stop and proc.poll() is None:
                     time.sleep(0.5)
+                # Process exited (or we were asked to stop): surface why.
+                if not self._stop:
+                    rc = proc.poll()
+                    err = self._drain_stderr(proc)
+                    if err:
+                        self.last_error = err
+                    log.warning("h264 push exited rc=%s: %s", rc,
+                                err or "(no ffmpeg stderr)")
             except FileNotFoundError:
                 self.last_error = "ffmpeg not found on PATH (sudo apt install ffmpeg)"
                 log.error(self.last_error)
@@ -452,13 +462,23 @@ class CameraBackend(object):
             self._cond.notify_all()
 
     def _drain_stderr(self, proc):
+        """Read ffmpeg's stderr to EOF and return the last meaningful line.
+
+        Reads line-by-line (returns "" immediately when the pipe is already at
+        EOF) so it never blocks on a full buffer when the process only printed
+        a short error before exiting."""
+        last = ""
         try:
-            err = proc.stderr.read(65536).decode("utf-8", "replace").strip()
-            if err:
-                self.last_error = err.splitlines()[-1]
-                log.warning("ffmpeg: %s", self.last_error)
+            for raw in proc.stderr:
+                line = raw.decode("utf-8", "replace").strip()
+                if line:
+                    last = line
         except Exception:
             pass
+        if last:
+            self.last_error = last
+            log.warning("ffmpeg: %s", last)
+        return last
 
     # -------------------------------------------------------------- clients
     def frames(self, last_seq):
