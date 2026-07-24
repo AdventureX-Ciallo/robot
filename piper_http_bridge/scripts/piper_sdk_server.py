@@ -399,8 +399,8 @@ class PiperSDKBackend(object):
 
             self._set_move_mode(self.MOVE_P)         # EndPoseCtrl needs MOVE P
             self.piper.EndPoseCtrl(
-                int(round(nx * 1000.0)), int(round(ny * 1000.0)),
-                int(round(nz * 1000.0)), int(round(nr * 1000.0)),
+                int(round(nx * 1e6)), int(round(ny * 1e6)),     # m -> 0.001 mm
+                int(round(nz * 1e6)), int(round(nr * 1000.0)),  # deg -> 0.001 deg
                 int(round(np_ * 1000.0)), int(round(nyw * 1000.0)))
         return {"ok": True,
                 "pose": {"x": round(nx, 4), "y": round(ny, 4), "z": round(nz, 4),
@@ -414,6 +414,14 @@ class PiperSDKBackend(object):
                 (ep.RX_axis / 1000.0, ep.RY_axis / 1000.0, ep.RZ_axis / 1000.0))
 
     # ---- rotation helpers ------------------------------------------------
+    # IMPORTANT: the SDK's own end-pose euler (GetArmEndPoseMsgs, and the FK in
+    # piper_fk's __MatrixToeula) uses the SAME convention:
+    #     pitch = atan2(-R[2][0], sqrt(R[0][0]^2 + R[1][0]^2))
+    #     yaw   = atan2(R[1][0], R[0][0])
+    #     roll  = atan2(R[2][1], R[2][2])
+    # which is the extrinsic X-Y-Z (fixed-axis) decomposition, i.e. the matrix
+    #     R = Rz(yaw) * Ry(pitch) * Rx(roll)      (apply roll, then pitch, then yaw)
+    # We build and decompose with that one convention so the round trip is exact.
     @staticmethod
     def _rotxyz(roll, pitch, yaw):                    # deg -> Rz(yaw)*Ry(pitch)*Rx(roll)
         cr, sr = math.cos(math.radians(roll)), math.sin(math.radians(roll))
@@ -432,8 +440,9 @@ class PiperSDKBackend(object):
 
     @staticmethod
     def _mat_to_euler_near(R, ref_roll, ref_yaw):
-        """ZYX euler (deg) of R, choosing the branch closest to the reference
-        roll/yaw so gimbal-lock cases (|pitch|~90) stay continuous."""
+        """SDK-convention euler (deg) of R = Rz(yaw)*Ry(pitch)*Rx(roll), choosing
+        the branch closest to the reference roll/yaw so gimbal-lock cases
+        (|pitch|~90) stay continuous."""
         sp = max(-1.0, min(1.0, -R[2][0]))
         pitch = math.asin(sp)
         cp = math.cos(pitch)

@@ -240,9 +240,9 @@ def test_jog(mod):
     check("jog ok", r.get("ok") is True)
     args = last_call(fake, "EndPoseCtrl")
     check("jog issues EndPoseCtrl", args is not None and len(args) == 6)
-    check("fwd +10mm -> X 210", args[0] == 210)
+    check("fwd +10mm -> X 210000", args[0] == 210000)
     check("y unchanged 0", args[1] == 0)
-    check("z unchanged 150", args[2] == 150)
+    check("z unchanged 150000", args[2] == 150000)
     mc = last_call(fake, "MotionCtrl_2")
     check("jog uses MOVE P", mc is not None and mc[1] == 0x00)
 
@@ -250,13 +250,13 @@ def test_jog(mod):
     b._current_pose = lambda: ((0.2, 0.0, 0.15), (0.0, 90.0, 90.0))
     r = b.cmd_jog(fwd=0.01)
     args = last_call(fake, "EndPoseCtrl")
-    check("yaw90 fwd -> +Y", args[1] == 10 and args[0] == 200)
+    check("yaw90 fwd -> +Y", args[1] == 10000 and args[0] == 200000)
 
     # --- up is world +Z regardless of yaw ---
     b._current_pose = lambda: ((0.2, 0.0, 0.15), (0.0, 90.0, 0.0))
     b.cmd_jog(up=0.005)
     args = last_call(fake, "EndPoseCtrl")
-    check("up +5mm -> Z 155", args[2] == 155)
+    check("up +5mm -> Z 155000", args[2] == 155000)
 
     # --- roll about the tool optical axis changes orientation ---
     b._current_pose = lambda: ((0.2, 0.0, 0.15), (0.0, 90.0, 0.0))
