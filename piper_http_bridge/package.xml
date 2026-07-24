@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>piper_http_bridge</name>
+  <version>0.1.0</version>
+  <description>
+    Exposes the AgileX Piper 6-axis arm over a plain HTTP/JSON (and TCP/JSON)
+    control port by bridging to the official piper_ros control node
+    (piper_ctrl_single_node.py). Runs headless on an Orange Pi 3B.
+  </description>
+  <maintainer email="dev@example.com">robot</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>rospy</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>piper_msgs</depend>
+
+  <export></export>
+</package>

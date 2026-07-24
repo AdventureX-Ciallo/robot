@@ -1,0 +1,45 @@
+<?xml version="1.0"?>
+<!--
+  One-shot launcher for the Orange Pi 3B headless setup.
+
+  Brings up:
+    1. the official piper control node (piper_ctrl_single_node.py) -- talks CAN
+    2. this package's HTTP/TCP bridge node                        -- exposes ports
+
+  Prereq on the Orange Pi 3B:
+    * CAN interface activated at 1 Mbps, e.g.   bash can_activate.sh can0 1000000
+    * roscore reachable (this launch starts one via the control node if needed,
+      but it's cleaner to run `roscore` yourself or via systemd).
+-->
+<launch>
+  <arg name="can_port"           default="can0" />
+  <arg name="auto_enable"        default="true" />
+  <arg name="girpper_exist"      default="true" />
+  <arg name="gripper_val_mutiple" default="1" />
+
+  <!-- HTTP/TCP bridge settings -->
+  <arg name="http_port"  default="8080" />
+  <arg name="tcp_port"   default="9090" />
+  <arg name="host"       default="0.0.0.0" />
+  <arg name="token"      default="" />
+  <arg name="enable_tcp" default="true" />
+
+  <!-- 1. Official control node (from the `piper` package). -->
+  <node name="piper_ctrl_single_node" pkg="piper" type="piper_ctrl_single_node.py" output="screen">
+    <param name="can_port"            value="$(arg can_port)" />
+    <param name="auto_enable"         value="$(arg auto_enable)" />
+    <param name="gripper_val_mutiple" value="$(arg gripper_val_mutiple)" />
+    <param name="girpper_exist"       value="$(arg girpper_exist)" />
+    <!-- remap the joint-control subscription to the topic the bridge publishes -->
+    <remap from="joint_ctrl_single" to="/joint_ctrl_single" />
+  </node>
+
+  <!-- 2. HTTP/TCP bridge node (this package). -->
+  <node name="piper_http_bridge" pkg="piper_http_bridge" type="piper_http_bridge_node.py" output="screen">
+    <param name="http_port"  value="$(arg http_port)" />
+    <param name="tcp_port"   value="$(arg tcp_port)" />
+    <param name="host"       value="$(arg host)" />
+    <param name="token"      value="$(arg token)" />
+    <param name="enable_tcp" value="$(arg enable_tcp)" />
+  </node>
+</launch>
