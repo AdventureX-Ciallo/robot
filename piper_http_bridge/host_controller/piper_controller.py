@@ -37,6 +37,15 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+# Windows consoles default to a latin-1/cp1252 codec; force UTF-8 so any
+# non-ASCII output (or a browser hitting us with a non-ASCII path) cannot
+# crash the server with "latin-1 codec can't encode ...".
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "client"))
 import piper_client as pc  # noqa: E402
@@ -147,22 +156,33 @@ def make_handler(ctrl, panel_html):
 
         def _json(self, code, obj):
             body = json.dumps(obj).encode("utf-8")
-            self.send_response(code)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send(code, "application/json", body)
 
         def _html(self, code, text):
-            body = text.encode("utf-8")
-            self.send_response(code)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send(code, "text/html; charset=utf-8", text.encode("utf-8"))
+
+        def _send(self, code, ctype, body):
+            # Guard against latin-1 header-buffer crashes when a client sends
+            # a non-ASCII request line (e.g. a path or header containing CJK).
+            try:
+                self.send_response(code)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (UnicodeEncodeError, BrokenPipeError, ConnectionResetError):
+                pass
 
         def log_message(self, *a):
             pass
+
+        def send_error(self, code, message=None, explain=None):
+            # The default BaseHTTPRequestHandler error page interpolates the
+            # request path into headers/body via latin-1, which crashes on
+            # non-ASCII paths. Serve a minimal ASCII-only error instead.
+            reason = self.responses.get(code, ("Error",))[0]
+            body = ("%d %s" % (code, reason)).encode("ascii", "replace")
+            self._send(code, "text/plain; charset=us-ascii", body)
 
         def do_GET(self):
             if self.path in ("/", "/index.html"):

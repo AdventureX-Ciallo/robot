@@ -24,6 +24,9 @@
 #   --speed N           default arm speed %% 1-100        (default 50)
 #   --workspace DIR     (ros backend) catkin workspace   (default ~/piper_ros_ws)
 #   --no-auto-enable    do NOT auto-enable the arm on startup (default: it does)
+#   --with-controller   also install the web control panel (piper-controller svc)
+#   --controller-port N control panel port               (default 8000)
+#   --controller-endpoint URL  endpoint the panel drives (default http://127.0.0.1:<http-port>)
 #   --no-service        install but do not install/start systemd
 #   --no-can            skip CAN bring-up (the server also brings can0 up itself)
 #   -h | --help         show this help
@@ -42,9 +45,12 @@ TOKEN="${TOKEN:-}"
 HTTP_PORT="${HTTP_PORT:-8080}"
 TCP_PORT="${TCP_PORT:-9090}"
 SPEED="${SPEED:-50}"
-AUTO_ENABLE=0
+AUTO_ENABLE=1
 INSTALL_SERVICE=1
 DO_CAN=1
+WITH_CONTROLLER=0
+CONTROLLER_PORT="${CONTROLLER_PORT:-8000}"
+CONTROLLER_ENDPOINT="${CONTROLLER_ENDPOINT:-}"
 
 PKG_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # the package dir
 PKG_NAME="piper_http_bridge"
@@ -74,6 +80,9 @@ while [[ $# -gt 0 ]]; do
     --no-auto-enable) AUTO_ENABLE=0; shift ;;
     --no-service)  INSTALL_SERVICE=0; shift ;;
     --no-can)      DO_CAN=0; shift ;;
+    --with-controller) WITH_CONTROLLER=1; shift ;;
+    --controller-port) CONTROLLER_PORT="$2"; shift 2 ;;
+    --controller-endpoint) CONTROLLER_ENDPOINT="$2"; shift 2 ;;
     -h|--help)     sed -n '2,32p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) die "unknown option: $1 (use --help)" ;;
   esac
@@ -229,8 +238,30 @@ else
   fi
 fi
 
-# ---- summary ------------------------------------------------------------------
+# ---- optional: host web control panel ------------------------------------------
 IP_ADDR="$(hostname -I 2>/dev/null | awk '{print $1}')"; IP_ADDR="${IP_ADDR:-<orangepi-ip>}"
+CONTROLLER_SUMMARY=""
+if [[ "$WITH_CONTROLLER" -eq 1 ]]; then
+  log "[+] Installing host web control panel (port $CONTROLLER_PORT) ..."
+  CTRL_INSTALL="$PKG_SRC/host_controller/install.sh"
+  if [[ -f "$CTRL_INSTALL" ]]; then
+    # default: panel runs on the same host as the arm service -> localhost
+    CEP="${CONTROLLER_ENDPOINT:-http://127.0.0.1:$HTTP_PORT}"
+    CTRL_ARGS=(--endpoint "$CEP" --port "$CONTROLLER_PORT" --speed "$SPEED")
+    [[ -n "$TOKEN" ]] && CTRL_ARGS+=(--token "$TOKEN")
+    [[ "$INSTALL_SERVICE" -eq 0 ]] && CTRL_ARGS+=(--no-service)
+    if bash "$CTRL_INSTALL" "${CTRL_ARGS[@]}"; then
+      ok "control panel installed"
+      CONTROLLER_SUMMARY="  Panel     : http://$IP_ADDR:$CONTROLLER_PORT/   (open in a browser)"
+    else
+      warn "control panel install failed (arm service is unaffected)"
+    fi
+  else
+    warn "host_controller/install.sh not found at $CTRL_INSTALL; skipping panel"
+  fi
+fi
+
+# ---- summary ------------------------------------------------------------------
 cat <<EOF
 
 $(printf '\033[1;32m')================ install complete ================$(printf '\033[0m')
@@ -239,6 +270,7 @@ $(printf '\033[1;32m')================ install complete ================$(printf
   HTTP      : http://$IP_ADDR:$HTTP_PORT   (GET /state, POST /cmd)
   TCP       : tcp://$IP_ADDR:$TCP_PORT      (newline-delimited JSON)
   Auth      : ${TOKEN:+bearer token ENABLED}${TOKEN:-none (WARNING: open control port!)}
+$CONTROLLER_SUMMARY
 
 Quick test:
   curl http://$IP_ADDR:$HTTP_PORT/state
