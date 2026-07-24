@@ -166,6 +166,7 @@ class CameraBackend(object):
         self._lock = threading.Lock()
         self._proc = None
         self._stop = False
+        self._stop_event = threading.Event()
         self.start_ts = time.time()
         self.last_frame_ts = None     # set on the first published frame
         self.frame_count = 0
@@ -198,12 +199,14 @@ class CameraBackend(object):
             if self._thread and self._thread.is_alive():
                 return
             self._stop = False
+            self._stop_event.clear()
             self._thread = threading.Thread(target=self._run, daemon=True)
             self._thread.start()
 
     def stop(self):
         """Stop capturing and kill any running ffmpeg (idempotent)."""
         self._stop = True
+        self._stop_event.set()
         self._kill_proc()
         with self._cond:
             self._cond.notify_all()      # wake stream handlers so they can exit
@@ -241,6 +244,8 @@ class CameraBackend(object):
             except Exception as e:
                 self.last_error = str(e)
                 log.error("capture error: %s", e)
+            finally:
+                self._kill_proc()
 
             if self._stop:
                 break
@@ -250,39 +255,40 @@ class CameraBackend(object):
             backoff = min(backoff * 2.0, 30.0)     # 1s -> 2 -> 4 ... cap 30s
 
     def _read_frames(self, proc):
-        """Read ffmpeg's mpjpeg stdout and publish each complete JPEG."""
-        buf = bytearray()
-        out = proc.stdout
-        while not self._stop:
-            chunk = out.read(65536)
-            if not chunk:
-                break                              # ffmpeg exited / pipe closed
-            buf += chunk
-            # ffmpeg (mpjpeg) writes:  --frame\r\n headers \r\n\r\n <jpeg> \r\n
-            # Splitting on the boundary marker gives us whole frames.
-            while True:
-                idx = buf.find(b"\r\n--" + BOUNDARY.encode())
-                if idx < 0:
-                    # keep the tail (could be a partial boundary) and read more
-                    if len(buf) > 4 * 1024 * 1024:   # runaway guard
-                        del buf[:-16]
-                    break
-                frame_blob = bytes(buf[:idx])
-                del buf[:idx]
-                jpeg = self._extract_jpeg(frame_blob)
-                if jpeg:
-                    self._publish(jpeg)
+        """Stream ffmpeg's mpjpeg stdout and publish each complete JPEG.
 
-    @staticmethod
-    def _extract_jpeg(blob):
-        """Return the JPEG inside one mpjpeg part (strip headers), or None."""
-        if not blob:
-            return None
-        s = blob.find(b"\xff\xd8")      # SOI
-        e = blob.rfind(b"\xff\xd9")     # EOI
-        if s < 0 or e < 0 or e <= s:
-            return None
-        return blob[s:e + 2]
+        We scan the byte stream for JPEG SOI/EOI markers rather than trusting
+        the multipart boundaries: that emits a frame the instant its EOI
+        arrives, is robust to buffering, and never waits on a trailing
+        boundary line that may sit in a buffer. Reading one byte at a time is
+        cheap on the RK3566 and means we never over-read into the next frame.
+        """
+        out = proc.stdout
+        buf = bytearray()
+        capturing = False
+        prev = -1
+        while not self._stop:
+            b = out.read(1)
+            if not b:
+                break                              # ffmpeg exited / pipe closed
+            cur = b[0]
+            if prev == 0xFF:
+                if cur == 0xD8:                    # SOI: start a fresh frame
+                    buf = bytearray(b"\xff\xd8")
+                    capturing = True
+                elif cur == 0xD9 and capturing:    # EOI: frame complete
+                    buf.append(0xD9)
+                    self._publish(bytes(buf))
+                    buf = bytearray()
+                    capturing = False
+                elif capturing:
+                    buf.append(cur)
+            elif capturing:
+                buf.append(cur)
+            prev = cur
+            if capturing and len(buf) > 4 * 1024 * 1024:   # corrupt-stream guard
+                buf = bytearray()
+                capturing = False
 
     def _publish(self, jpeg):
         with self._cond:
@@ -297,7 +303,7 @@ class CameraBackend(object):
 
     def _drain_stderr(self, proc):
         try:
-            err = proc.stderr.read().decode("utf-8", "replace").strip()
+            err = proc.stderr.read(65536).decode("utf-8", "replace").strip()
             if err:
                 self.last_error = err.splitlines()[-1]
                 log.warning("ffmpeg: %s", self.last_error)
@@ -314,9 +320,8 @@ class CameraBackend(object):
         """
         while True:
             with self._cond:
-                if self._seq == last_seq and not self._stop:
-                    self._cond.wait(timeout=5.0)
-                if self._stop:
+                self._cond.wait(timeout=0.1)
+                if self._stop or self._stop_event.is_set():
                     return
                 if self._seq == last_seq:
                     continue           # spurious wakeup / timeout, no new frame

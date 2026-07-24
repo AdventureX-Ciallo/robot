@@ -1,0 +1,27 @@
+# systemd unit to auto-start the camera live-stream daemon on the Orange Pi 3B
+# at boot.
+#
+# Install (or just run ./camera_stream/install.sh, which writes this for you):
+#   sudo cp scripts/camera-stream.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now camera-stream.service
+#
+# Adjust the device, resolution and port to your setup.
+
+[Unit]
+Description=HTTP MJPEG live-stream daemon for the Orange Pi camera
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# root can always open /dev/video*; switch to a video-group user if you prefer.
+User=root
+Group=root
+ExecStart=/usr/bin/python3 /home/orangepi/robot/camera_stream/scripts/camera_stream_server.py --device /dev/video0 --host 0.0.0.0 --port 8090 --width 1280 --height 720 --fps 30
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target
