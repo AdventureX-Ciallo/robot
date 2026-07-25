@@ -132,6 +132,10 @@
       <h2>实时状态</h2>
       <div class="state" id="state">—</div>
     </div>
+    <div class="card">
+      <h2>服务端状态</h2>
+      <div class="state" id="server">—</div>
+    </div>
   </div>
 
   <!-- 右:夹爪 -->
@@ -221,8 +225,8 @@ let _seq=0;
 setInterval(()=>{
   _refreshVec();
   _seq++;
-  if(_seq%7===0) _teleop({action:"keepalive"});       // 每 7 次 -> 保活
-  else _teleop({action:"move", vec:_vec});
+  if(_seq%7===0) _teleop({action:"keepalive", _id:1});       // 每 7 次 -> 保活
+  else _teleop({action:"move", vec:_vec, _id:1});
 }, 10);   // 100 Hz
 
 // ---------- 网络 ----------
@@ -238,8 +242,8 @@ function toast(msg){
   const t=$("#toast"); t.textContent=msg; t.style.display="block";
   clearTimeout(t._h); t._h=setTimeout(()=>t.style.display="none",2500);
 }
-// 遥控信令(teleop 通道,即发即忘;WS 不通回退 HTTP)
-function _teleop(payload){ if(!_wsSend("teleop",payload)) api("/api/"+payload.action,payload); }
+// 遥控信令(teleop 通道;WS 带回包以便报错,WS 不通回退 HTTP,错误弹 toast)
+function _teleop(payload){ _wsCmd("teleop",payload); }
 
 // ---------- 回显 ----------
 function flash(el){ if(!el) return; el.classList.add("press");
@@ -528,6 +532,19 @@ function render(r){
 末端姿态 R ${fmt(p.roll,1)}  P ${fmt(p.pitch,1)}  Y ${fmt(p.yaw,1)}  °
 夹爪     ${fmt(s.gripper_mm,1)} mm
 状态码   ctrl=${s.arm_status?s.arm_status.ctrl_mode:"—"}  err=${s.arm_status?s.arm_status.err_code:"—"}`;
+  // ---- 服务端(控制器)状态 ----
+  const sv=s.server;
+  if(sv){
+    const L=(sv.latch||sv.target||[]).map(v=>fmt(v,1)).join("  ");
+    $("#server").textContent=
+`挂起     ${sv.suspended?"是":"否"}    锁存(目标°) ${L||"—"}
+链路     ${sv.stale?"已断开(保活超时)":"正常"}    保活年龄 ${fmt(sv.ka_age,2)} s
+运动向量 [${(sv.vec||[]).map(v=>fmt(v,1)).join(", ")}]
+信令     move ${sv.c_move}  保活 ${sv.c_keepalive}  hold ${sv.c_hold}
+帧组     错误帧组 ${sv.c_badgroup}  重同步 ${sv.c_resync}  跳拍 ${sv.c_skip}`;
+  }else{
+    $("#server").textContent="—";
+  }
   return true;
 }
 

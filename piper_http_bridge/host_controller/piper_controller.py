@@ -60,6 +60,17 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "client"))
 import piper_client as pc  # noqa: E402
 
+# Joint limits (deg) -- mirrors server_common.validate_joints. The jog loop
+# clamps the per-joint target to these so one axis reaching its limit never
+# makes joint_ctrl reject the whole frame (which silently froze all jogging).
+JOINT_LIMITS = [(-150.0, 150.0), (0.0, 180.0), (-170.0, 0.0),
+                (-100.0, 100.0), (-70.0, 70.0), (-120.0, 120.0)]
+
+
+def _clamp_joint(j, v):
+    lo, hi = JOINT_LIMITS[j]
+    return max(lo, min(hi, v))
+
 
 class Controller(object):
     """Motion-vector jog controller.
@@ -101,15 +112,45 @@ class Controller(object):
         self._target = None          # commanded joints the loop is steering to
         self._suspend = False        # True -> loop idle (after go_zero/stop)
         self._stop = threading.Event()
+        # diagnostics counters
+        self._c_move = 0             # motion-vector packets received
+        self._c_ka = 0               # keepalive packets received
+        self._c_hold = 0             # hold packets received
+        self._c_badgroup = 0         # frame-groups that went stale (no keepalive)
+        self._c_resync = 0           # target re-syncs to feedback
+        self._c_skip = 0             # ticks skipped on a bad read/send
+        self._stale_now = False      # currently in a stale (link-dead) stretch
         self._wd = threading.Thread(target=self._loop, daemon=True)
         self._wd.start()
 
     # ---- state ---------------------------------------------------------
     def state(self):
         try:
-            return {"ok": True, "state": self.client.state()}
+            st = self.client.state()
+            if isinstance(st, dict):
+                st["server"] = self.diag()
+            return {"ok": True, "state": st}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    def diag(self):
+        """Internal controller status for the panel's server-state readout."""
+        with self._lock:
+            tgt = list(self._target) if self._target else None
+            return {
+                "suspended": self._suspend,
+                "stale": self._stale_now,
+                "vec": [round(v, 2) for v in self._vec],
+                "target": ([round(v, 2) for v in tgt] if tgt is not None else None),
+                "latch": ([round(v, 2) for v in tgt] if tgt is not None else None),
+                "ka_age": round(max(0.0, time.time() - self._ka), 2),
+                "c_move": self._c_move,
+                "c_keepalive": self._c_ka,
+                "c_hold": self._c_hold,
+                "c_badgroup": self._c_badgroup,
+                "c_resync": self._c_resync,
+                "c_skip": self._c_skip,
+            }
 
     def _read_joints(self):
         st = self.client.state()
@@ -142,17 +183,20 @@ class Controller(object):
             self._suspend = False      # fresh input re-engages the loop
             self._vec = v
             self._ka = time.time()
+            self._c_move += 1
         return {"ok": True}
 
     def keepalive(self):
         with self._lock:
             self._ka = time.time()
+            self._c_ka += 1
         return {"ok": True}
 
     def hold(self):
         with self._lock:
             self._vec = [0.0] * 6
             self._ka = time.time()
+            self._c_hold += 1
         return {"ok": True}
 
     # ---- control loop: poll the vector, steer along it -----------------
@@ -172,12 +216,21 @@ class Controller(object):
             suspended = self._suspend
         if now - ka > self.STALE_S:
             vec = [0.0] * 6                            # stale -> released
+            with self._lock:
+                if not self._stale_now:                # a frame-group went dead
+                    self._c_badgroup += 1
+                self._stale_now = True
+        else:
+            with self._lock:
+                self._stale_now = False
 
         # A bad read (CAN/network blip) must not wedge the loop: skip this tick
         # and KEEP the current intent, so motion resumes on the next clean tick.
         try:
             joints = self._read_joints()
         except Exception:
+            with self._lock:
+                self._c_skip += 1
             return
         with self._lock:
             if self._target is None:
@@ -185,13 +238,15 @@ class Controller(object):
             target = list(self._target)
 
         if any(v != 0.0 for v in vec):
-            # non-zero components -> integrate the target along the vector
+            # non-zero components -> integrate the target along the vector,
+            # clamped to each joint's limit so a maxed-out axis can't wedge the rest
             for j in range(6):
                 v = vec[j]
                 if v == 0.0:
                     continue
                 dps = max(1.0, min(self.MAX_DPS, abs(v) * self.SPEED_MULT))
-                target[j] += (1.0 if v > 0 else -1.0) * dps * self.TICK
+                target[j] = _clamp_joint(j, target[j] +
+                                         (1.0 if v > 0 else -1.0) * dps * self.TICK)
         elif suspended:
             # go_zero / stop owns the arm right now -> stay out of the way
             with self._lock:
@@ -207,6 +262,7 @@ class Controller(object):
             # re-sync to where the arm actually is and wait for a clean vector
             with self._lock:
                 self._target = list(joints)
+                self._c_resync += 1
             return
         if err <= self.POS_TOL:
             return                                         # settled; don't spam
@@ -214,6 +270,8 @@ class Controller(object):
             self.client.joint_ctrl(target, speed=self.speed)
         except Exception:
             # send failed this tick -> wait for the next clean tick; don't lock up
+            with self._lock:
+                self._c_skip += 1
             return
 
     # ---- joint jog -----------------------------------------------------
