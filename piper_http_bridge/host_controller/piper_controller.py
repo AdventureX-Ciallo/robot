@@ -179,9 +179,14 @@ class Controller(object):
                     * abs(float(step_deg))
         v = [float(x) for x in list(vec)[:6]]
         v += [0.0] * (6 - len(v))
+        active = any(x != 0.0 for x in v)
         with self._lock:
-            self._suspend = False      # fresh input re-engages the loop
-            self._vec = v
+            # While parked (go_zero/stop), a non-zero vector must NOT re-engage
+            # the loop -- it would drag the arm off the go-zero path. An
+            # all-zero vector (a real release) unlatches the park.
+            if not (self._suspend and active):
+                self._vec = v
+                self._suspend = False
             self._ka = time.time()
             self._c_move += 1
         return {"ok": True}
@@ -193,8 +198,10 @@ class Controller(object):
         return {"ok": True}
 
     def hold(self):
+        # An explicit release unlatches a park (go_zero/stop) so jogging resumes.
         with self._lock:
             self._vec = [0.0] * 6
+            self._suspend = False
             self._ka = time.time()
             self._c_hold += 1
         return {"ok": True}
