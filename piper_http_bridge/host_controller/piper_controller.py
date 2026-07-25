@@ -80,6 +80,7 @@ class Controller(object):
     SPEED_MULT = 4.0       # |vector component| (deg) -> jog speed: |v|*4 deg/s
     STALE_S = 0.4          # no keepalive/vector for this long -> released
     POS_TOL = 0.05         # deg; below this error we stop commanding (deadband)
+    RESYNC_DEG = 30.0      # target this far from feedback -> re-sync & wait
 
     def __init__(self, endpoint, token="", speed=30, capture_dir=""):
         self.ep = endpoint.rstrip("/")
@@ -172,7 +173,12 @@ class Controller(object):
         if now - ka > self.STALE_S:
             vec = [0.0] * 6                            # stale -> released
 
-        joints = self._read_joints()
+        # A bad read (CAN/network blip) must not wedge the loop: skip this tick
+        # and KEEP the current intent, so motion resumes on the next clean tick.
+        try:
+            joints = self._read_joints()
+        except Exception:
+            return
         with self._lock:
             if self._target is None:
                 self._target = list(joints)
@@ -196,9 +202,19 @@ class Controller(object):
         err = max(abs(target[i] - joints[i]) for i in range(6))
         with self._lock:
             self._target = target
+        if err > self.RESYNC_DEG:
+            # target ran away from reality (bad/stale signaling, restart) ->
+            # re-sync to where the arm actually is and wait for a clean vector
+            with self._lock:
+                self._target = list(joints)
+            return
         if err <= self.POS_TOL:
             return                                         # settled; don't spam
-        self.client.joint_ctrl(target, speed=self.speed)
+        try:
+            self.client.joint_ctrl(target, speed=self.speed)
+        except Exception:
+            # send failed this tick -> wait for the next clean tick; don't lock up
+            return
 
     # ---- joint jog -----------------------------------------------------
     def joint_jog(self, index, delta_deg):
