@@ -557,6 +557,7 @@ def make_handler(ctrl, panel_html, hub=None):
             except (UnicodeEncodeError, BrokenPipeError, ConnectionResetError):
                 return
             client = WSClient(self.rfile, self.wfile)
+            print("[ws] %s connected" % self.path)
             # /ws/state only ever pushes state; the two command channels read.
             if self.path == "/ws/state":
                 hub.add(client)
@@ -591,6 +592,7 @@ def make_handler(ctrl, panel_html, hub=None):
                         client.send(json.dumps(err))
                     except Exception:
                         client.alive = False
+            print("[ws] %s closed" % self.path)
             self.close_connection = True
 
         def do_POST(self):
