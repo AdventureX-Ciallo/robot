@@ -41,10 +41,11 @@ ROS 桥架构（可选 `--backend ros`）：`客户端 → piper_http_bridge_nod
 | 关节角 joint_ctrl | **度 (deg)** | 6 个值，内部转成 rad 发给 ROS |
 | 末端位置 x,y,z | **毫米 (mm)** | 内部转成 m |
 | 末端姿态 roll,pitch,yaw | **度 (deg)** | 内部转成 rad |
-| 夹爪 gripper | **毫米 (mm)** | 0~80，内部转成 m |
+| 夹爪 gripper | **毫米 (mm)** | 0~100（±0.5），内部转成 m |
 | 速度 speed | 1~100 (%) | |
 
-关节限位（度，软件侧校验，超出直接拒绝）：J1 ±150，J2 0~180，J3 -170~0，J4 ±100，J5 ±70，J6 ±120。
+关节限位（度，软件侧校验，超出直接拒绝）：J1 ±154，J2 0~195，J3 -175~0，J4 ±102，J5 ±75，J6 ±170。
+关节最大速度（度/秒）：J1 180，J2 195，J3 180，J4 225，J5 225，J6 225。
 
 ---
 
@@ -150,7 +151,7 @@ curl -X POST http://192.168.1.100:8080/cmd -d '{
 }'
 ```
 
-**夹爪**（position_mm 0~80；effort 0~5000 即 0~5 N·m）
+**夹爪**（position_mm 0~100；effort 0~5000 即 0~5 N·m）
 ```bash
 curl -X POST http://192.168.1.100:8080/cmd -d '{"action":"gripper","position_mm":0,"effort":1000}'
 ```

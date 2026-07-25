@@ -60,11 +60,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "client"))
 import piper_client as pc  # noqa: E402
 
-# Joint limits (deg) -- mirrors server_common.validate_joints. The jog loop
-# clamps the per-joint target to these so one axis reaching its limit never
-# makes joint_ctrl reject the whole frame (which silently froze all jogging).
-JOINT_LIMITS = [(-150.0, 150.0), (0.0, 180.0), (-170.0, 0.0),
-                (-100.0, 100.0), (-70.0, 70.0), (-120.0, 120.0)]
+# Joint limits (deg) -- measured motion range of this arm, mirrored in
+# server_common.validate_joints. The jog loop clamps the per-joint target to
+# these so one axis reaching its limit never makes joint_ctrl reject the whole
+# frame (which silently froze all jogging).
+JOINT_LIMITS = [(-154.0, 154.0), (0.0, 195.0), (-175.0, 0.0),
+                (-102.0, 102.0), (-75.0, 75.0), (-170.0, 170.0)]
+
+# Per-joint max velocity (deg/s) -- measured activity speed of this arm.
+JOINT_MAX_DPS = [180.0, 195.0, 180.0, 225.0, 225.0, 225.0]
 
 
 def _clamp_joint(j, v):
@@ -87,7 +91,6 @@ class Controller(object):
     """
 
     TICK = 0.05            # control-loop poll period (s) -> 20 Hz
-    MAX_DPS = 45.0         # deg/s slew cap per joint (safety)
     SPEED_MULT = 4.0       # |vector component| (deg) -> jog speed: |v|*4 deg/s
     STALE_S = 0.4          # no keepalive/vector for this long -> released
     POS_TOL = 0.05         # deg; below this error we stop commanding (deadband)
@@ -256,7 +259,8 @@ class Controller(object):
                 v = vec[j]
                 if v == 0.0:
                     continue
-                dps = max(1.0, min(self.MAX_DPS, abs(v) * self.SPEED_MULT))
+                # slew cap = this joint's measured max velocity
+                dps = max(1.0, min(JOINT_MAX_DPS[j], abs(v) * self.SPEED_MULT))
                 target[j] = _clamp_joint(j, target[j] +
                                          (1.0 if v > 0 else -1.0) * dps * self.TICK)
         elif suspended:

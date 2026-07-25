@@ -185,7 +185,7 @@ def test_validation_and_units(mod):
         check("rejects wrong joint count", False)
     except ValueError:
         check("rejects wrong joint count", True)
-    # out of range (J2 max 180)
+    # out of range (J2 max 195)
     try:
         mod.PiperBridge._validate_joints([0, 200, 0, 0, 0, 0])
         check("rejects out-of-range joint", False)

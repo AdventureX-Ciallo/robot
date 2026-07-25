@@ -363,8 +363,9 @@ class PiperSDKBackend(object):
                                      js.joint_4, js.joint_5, js.joint_6)]
 
     def cmd_gripper(self, position_mm, effort=1000):
-        # mm -> 0.001 mm ; effort 0..5000 (0.001 N/m)
-        angle = int(round(float(position_mm) * 1000.0))
+        # mm -> 0.001 mm ; effort 0..5000 (0.001 N/m); travel clamped to range
+        position_mm = sc.clamp_gripper(position_mm)
+        angle = int(round(position_mm * 1000.0))
         effort = int(max(0, min(5000, int(effort))))
         with self._lock:
             self.piper.GripperCtrl(angle, effort, 0x01, 0)

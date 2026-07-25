@@ -20,15 +20,33 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from socketserver import ThreadingTCPServer, StreamRequestHandler
 
-# Joint limits (degrees) -- mirrors the official piper_sdk JointCtrl table.
+# Joint limits (degrees) -- measured motion range of this arm (see
+# piper_controller.py / piper_http_bridge_node.py which mirror this table).
 JOINT_LIMITS_DEG = [
-    (-150.0, 150.0),   # joint 1
-    (0.0,    180.0),   # joint 2
-    (-170.0, 0.0),     # joint 3
-    (-100.0, 100.0),   # joint 4
-    (-70.0,  70.0),    # joint 5
-    (-120.0, 120.0),   # joint 6
+    (-154.0, 154.0),   # joint 1
+    (0.0,    195.0),   # joint 2
+    (-175.0, 0.0),     # joint 3
+    (-102.0, 102.0),   # joint 4
+    (-75.0,  75.0),    # joint 5
+    (-170.0, 170.0),   # joint 6
 ]
+
+# Per-joint max velocity (deg/s) -- measured activity speed of this arm.
+JOINT_MAX_DPS = [180.0, 195.0, 180.0, 225.0, 225.0, 225.0]
+
+# Gripper open/close travel (mm) -- measured 0..100 with +/-0.5 mm tolerance.
+GRIPPER_MIN_MM = 0.0
+GRIPPER_MAX_MM = 100.0
+GRIPPER_TOL_MM = 0.5
+
+
+def clamp_gripper(position_mm):
+    """Clamp a gripper target (mm) into the measured travel range."""
+    try:
+        v = float(position_mm)
+    except (TypeError, ValueError):
+        return GRIPPER_MIN_MM
+    return max(GRIPPER_MIN_MM, min(GRIPPER_MAX_MM, v))
 
 import math
 DEG2RAD = math.pi / 180.0
