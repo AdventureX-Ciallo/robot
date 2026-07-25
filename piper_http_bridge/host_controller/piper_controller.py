@@ -62,22 +62,26 @@ import piper_client as pc  # noqa: E402
 
 
 class Controller(object):
-    """Velocity-driven jog controller.
+    """Intent-stack jog controller.
 
-    The panel sends ONE 'move' signal on key/button press and ONE 'hold'
-    signal on release -- not a 40 Hz stream of position increments. While a
-    move is active a watchdog here keeps handing the arm fresh position
-    targets (base += vel*dt each tick), so motion is smooth and the arm is
-    always chasing a near-future point. On 'hold' -- or if keepalives stop
-    arriving (browser closed / link dead) -- the watchdog immediately
-    re-issues the CURRENT target (decelerate in place) and re-syncs the base
-    to real feedback, so the arm stops right away instead of draining a
-    backlog of queued targets (the overshoot).
+    The panel pushes its *intent* (which joint, which direction, what step)
+    to this controller at a fixed rate. Each push overwrites the top of a
+    one-deep stack. A control loop here samples that stack at its own fixed
+    tick and moves the arm a smooth, velocity-limited step toward the latest
+    intent -- so motion cadence is owned by the controller, not by how fast
+    the browser happens to send (no oscillation, no overshoot from backlog).
+
+    - move  -> push intent (joint, dir, step); loop keeps integrating.
+    - hold  -> push "no intent"; loop converges on the current position and
+               the arm decelerates to a stop right where it is (no e-stop).
+    - silence (browser closed / link dead) -> intent goes stale after
+               STALE_S and the loop holds position automatically.
     """
 
-    TICK = 0.04            # watchdog period (s) -> 25 Hz target refresh
-    KA_TIMEOUT = 0.45      # no keepalive for this long -> auto-hold
-    VEL_CAP = 45.0         # deg/s safety cap on jog velocity
+    TICK = 0.05            # control-loop period (s) -> 20 Hz
+    MAX_DPS = 30.0         # deg/s slew cap while jogging (smooth band)
+    STALE_S = 0.4          # intent older than this -> treat as released
+    POS_TOL = 0.05         # deg; below this error we stop commanding (deadband)
 
     def __init__(self, endpoint, token="", speed=30, capture_dir=""):
         self.ep = endpoint.rstrip("/")
@@ -92,87 +96,84 @@ class Controller(object):
         self.speed = speed
         self.capture_dir = capture_dir
         self._capture_count = 0
-        self._last_joints = None     # commanded joints (jog base; synced to feedback)
         self._lock = threading.Lock()
-        self._vel = [0.0] * 6        # deg/s per joint while a move is active
-        self._ka = 0.0               # last keepalive (or move) timestamp
+        self._intent = None          # latest {"index","dir","step","ts"} or None
+        self._target = None          # commanded joints the loop is steering to
         self._stop = threading.Event()
-        self._wd = threading.Thread(target=self._watchdog, daemon=True)
+        self._wd = threading.Thread(target=self._loop, daemon=True)
         self._wd.start()
 
     # ---- state ---------------------------------------------------------
     def state(self):
         try:
-            st = self.client.state()
-            # Correct the jog base from real feedback so drift doesn't accumulate.
-            if isinstance(st, dict) and st.get("joints_deg"):
-                with self._lock:
-                    self._last_joints = list(st["joints_deg"])
-            return {"ok": True, "state": st}
+            return {"ok": True, "state": self.client.state()}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    # ---- move / hold signaling ----------------------------------------
+    def _read_joints(self):
+        st = self.client.state()
+        j = st.get("joints_deg") if isinstance(st, dict) else None
+        if not j:
+            raise pc.PiperError("no joint feedback yet")
+        return list(j)
+
+    # ---- intent stack (one-deep; latest wins) --------------------------
     def move(self, index, direction, step_deg, boost=1):
-        """Press signal: start jogging `index` in `direction` at step*boost deg/s."""
         index = int(index)
         if not 0 <= index <= 5:
             raise pc.PiperError("joint index must be 0..5")
-        vel = max(-self.VEL_CAP, min(self.VEL_CAP,
-                  float(direction) * abs(float(step_deg)) * float(boost or 1)))
         with self._lock:
-            self._vel = [0.0] * 6
-            self._vel[index] = vel
-            self._ka = time.time()       # a move also counts as a keepalive
-        return {"ok": True, "index": index, "vel": vel}
+            self._intent = {"index": index, "dir": 1.0 if float(direction) >= 0 else -1.0,
+                            "step": abs(float(step_deg)) * float(boost or 1),
+                            "ts": time.time()}
+        return {"ok": True}
 
     def keepalive(self):
+        # keepalive only refreshes freshness; it never creates motion on its own
         with self._lock:
-            self._ka = time.time()
+            if self._intent is not None:
+                self._intent["ts"] = time.time()
         return {"ok": True}
 
     def hold(self):
-        """Release signal: stop jogging now and re-sync to real feedback."""
         with self._lock:
-            self._vel = [0.0] * 6
-            self._ka = time.time()
-        self._sync_base()
+            self._intent = None
         return {"ok": True}
 
-    def _sync_base(self):
-        try:
-            st = self.client.state()
-            if isinstance(st, dict) and st.get("joints_deg"):
-                with self._lock:
-                    self._last_joints = list(st["joints_deg"])
-        except Exception:
-            pass
-
-    # ---- watchdog: stream targets while moving, stop on keepalive loss --
-    def _watchdog(self):
+    # ---- control loop: sample the stack, steer toward latest intent ----
+    def _loop(self):
         while not self._stop.is_set():
             time.sleep(self.TICK)
-            with self._lock:
-                vel = list(self._vel)
-                base = list(self._last_joints) if self._last_joints else None
-                ka = self._ka
-            moving = any(v != 0.0 for v in vel)
-            if not moving:
-                continue
-            # keepalive lost (browser closed / link dead) -> stop the arm
-            if time.time() - ka > self.KA_TIMEOUT:
-                self.hold()
-                continue
-            if base is None:
-                self._sync_base()
-                continue
-            target = [base[i] + vel[i] * self.TICK for i in range(6)]
             try:
-                self.client.joint_ctrl(target, speed=self.speed)
-                with self._lock:
-                    self._last_joints = target
+                self._tick()
             except Exception:
                 pass
+
+    def _tick(self):
+        now = time.time()
+        with self._lock:
+            it = dict(self._intent) if self._intent else None
+        if it is not None and (now - it["ts"]) > self.STALE_S:
+            it = None                                    # stale -> released
+
+        joints = self._read_joints()
+        with self._lock:
+            if self._target is None:
+                self._target = list(joints)
+            target = list(self._target)
+
+        if it is not None:
+            # advance the goal at a velocity proportional to the requested step
+            dps = max(1.0, min(self.MAX_DPS, it["step"] * 10.0))
+            target[it["index"]] += it["dir"] * dps * self.TICK
+        # else: intent released -> target stays put; arm converges & stops
+
+        err = max(abs(target[i] - joints[i]) for i in range(6))
+        with self._lock:
+            self._target = target
+        if err <= self.POS_TOL:
+            return                                         # settled; don't spam
+        self.client.joint_ctrl(target, speed=self.speed)
 
     # ---- joint jog -----------------------------------------------------
     def joint_jog(self, index, delta_deg):
@@ -180,17 +181,11 @@ class Controller(object):
         if not 0 <= index <= 5:
             raise pc.PiperError("joint index must be 0..5")
         delta = float(delta_deg)
+        joints = self._read_joints()
+        joints[index] = joints[index] + delta
+        self.client.joint_ctrl(joints, speed=self.speed)
         with self._lock:
-            base = self._last_joints
-            if base is None:
-                st = self.client.state()
-                base = st.get("joints_deg")
-                if not base:
-                    raise pc.PiperError("no joint feedback yet")
-            joints = list(base)
-            joints[index] = joints[index] + delta
-            res = self.client.joint_ctrl(joints, speed=self.speed)
-            self._last_joints = joints
+            self._target = list(joints)
         return {"ok": True, "joints_deg": joints}
 
     # ---- gripper / mode ------------------------------------------------

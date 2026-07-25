@@ -177,11 +177,16 @@ let gripEditing = false;   // 用户正在拖滑条
 let _ws=null, _wsReady=false, _cid=0;
 const _pending={};
 
-// 保活:运动期间周期打点。浏览器若关闭/断线导致"松开"丢失,
-// 服务器看门狗在 ~400ms 收不到保活时自动把机械臂停下。
-const _KA_MS=150;
-setInterval(()=>{ if(_moving()) _send({action:"keepalive"}); }, _KA_MS);
-function _moving(){ return _jj.i!=null; }
+// 意图以固定频率推给控制器:按住的轴+方向+步长,未按则为"停"。
+// 控制器把最新意图压栈,控制环按自己的节拍取样执行 => 平滑;
+// 浏览器关掉/断线 -> 信令停 -> 控制器超时自动停(保活)。
+const _SIG_MS=50;
+setInterval(()=>{
+  const m = (_jj.i!=null)
+    ? {action:"move", index:_jj.i, dir:_jj.d, step:_jj.step, boost:1}
+    : {action:"hold"};
+  _signal(m);
+}, _SIG_MS);
 
 // ---------- 网络 ----------
 async function api(path, payload){
@@ -196,12 +201,21 @@ function toast(msg){
   const t=$("#toast"); t.textContent=msg; t.style.display="block";
   clearTimeout(t._h); t._h=setTimeout(()=>t.style.display="none",2500);
 }
-function _send(payload){            // 立即下发(信令/保活用),带发送打点
+function _send(payload){            // 立即下发(一次性命令:使能/夹爪/拍照等)
   if(_wsReady && _ws){
     try{ _ws.send(JSON.stringify(payload)); return; }
     catch(e){}
   }
   api("/api/"+payload.action, payload);
+}
+// 意图流:只在内容变化时才真正发送,避免对相同状态刷屏;
+// 浏览器一关,这条流自然中断,控制器超时即停。
+let _lastSig="";
+function _signal(payload){
+  const k=payload.action+"|"+(payload.index??"")+"|"+(payload.dir??"")+"|"+(payload.step??"");
+  if(k===_lastSig) return;
+  _lastSig=k;
+  _send(payload);
 }
 function doCmd(payload){
   // 控制走 WebSocket(低延迟,单连接);WS 未就绪时回退到 HTTP POST。
@@ -231,34 +245,34 @@ function flashKey(k){
 }
 
 // ---------- 关节点动（按下=一条 move 信令，松开=一条 hold 信令） ----------
-// 按住不再是高频灌增量,而是:按下发一条"持续运动"信令,运动期间服务器
-// 看门狗按当前速度持续给机械臂续目标;松开发一条"停"信令立即减速停。
-// 点按(很快松开)= 一下 move 紧跟 hold,自然走一小步。
-const BOOST=3;         // 按住后的步长倍率
+// 按下发一条 move,运动期间服务器看门狗以固定增量、匀速沿该方向持续
+// "爬行"(从当前位置加同一增量),不会追不断前移的目标而摆动;
+// 松开发一条 hold,服务器把当前位置原样回发,手臂就地减速停(不泄压)。
+// 点按(很快松开)= 一下 move 紧跟 hold,走一小步。低速档 => 平滑不摆。
 const _jj={i:null, d:0, step:0};
 
 function _setBoost(on){ const b=$("#boost"+_jj.i); if(b) b.classList.toggle("on",!!on); }
 
-// 按下:记录方向与步长,发一条 move 信令(速度=步长×倍率,持续运动)。
-function _moveStart(i,d,boost){
+// 按下:记录方向与步长,发一条 move 信令(服务器据此持续爬行)。
+function _moveStart(i,d){
   _jj.i=i; _jj.d=d; _jj.step=jointStep(i);
-  _setBoost(!!boost);
-  _send({action:"move", index:i, dir:d, step:_jj.step, boost:boost?BOOST:1});
+  _setBoost(false);
+  _send({action:"move", index:i, dir:d, step:_jj.step, boost:1});
 }
-// 松开/结束:清状态并发一条 hold 信令(立即减速停,且重置服务器基座)。
+// 松开/结束:清状态并发一条 hold 信令(就地停住)。
 function stopJoint(){
   if(_jj.i==null) return;
   _jj.i=null;
   _send({action:"hold"});
 }
 
-// 触摸/鼠标:按下=move(1x,系统会按住 -> 服务器续),松开=hold。
-function pressJoint(i,d){ _moveStart(i,d,false); }
+// 触摸/鼠标:按下=move,松开=hold。
+function pressJoint(i,d){ _moveStart(i,d); }
 function releaseJoint(){ stopJoint(); }
 
-// 键盘:点按=move(1x);repeat(系统确认按住)=move(BOOST 提速)。松开=hold。
-function kbTap(i,d){ _moveStart(i,d,false); }
-function kbHold(i,d){ _moveStart(i,d,true); }
+// 键盘:点按/按住 repeat 都发 move;松开=hold。
+function kbTap(i,d){ _moveStart(i,d); }
+function kbHold(i,d){ _moveStart(i,d); }
 
 // 键盘 -> 关节/方向(0-based 索引)
 const KEYJ={"1":{i:0,d:-1},"2":{i:0,d:+1},
