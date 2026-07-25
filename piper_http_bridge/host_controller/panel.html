@@ -242,8 +242,9 @@ function toast(msg){
   const t=$("#toast"); t.textContent=msg; t.style.display="block";
   clearTimeout(t._h); t._h=setTimeout(()=>t.style.display="none",2500);
 }
-// 遥控信令(teleop 通道;WS 带回包以便报错,WS 不通回退 HTTP,错误弹 toast)
-function _teleop(payload){ _wsCmd("teleop",payload); }
+// 遥控信令走 teleop 这条 WS(即发即忘,100Hz,不开 HTTP 连接)。
+// WS 暂时没连上就先丢——下一拍马上重发,控制器靠保活超时兜底,绝不用 POST 凑。
+function _teleop(payload){ _wsSend("teleop",payload); }
 
 // ---------- 回显 ----------
 function flash(el){ if(!el) return; el.classList.add("press");
