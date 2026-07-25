@@ -62,26 +62,23 @@ import piper_client as pc  # noqa: E402
 
 
 class Controller(object):
-    """Intent-stack jog controller.
+    """Motion-vector jog controller.
 
-    The panel pushes its *intent* (which joint, which direction, what step)
-    to this controller at a fixed rate. Each push overwrites the top of a
-    one-deep stack. A control loop here samples that stack at its own fixed
-    tick and moves the arm a smooth, velocity-limited step toward the latest
-    intent -- so motion cadence is owned by the controller, not by how fast
-    the browser happens to send (no oscillation, no overshoot from backlog).
-
-    - move  -> push intent (joint, dir, step); loop keeps integrating.
-    - hold  -> push "no intent"; loop converges on the current position and
-               the arm decelerates to a stop right where it is (no e-stop).
-    - silence (browser closed / link dead) -> intent goes stale after
-               STALE_S and the loop holds position automatically.
+    The browser owns a 6-vector V: holding a joint's "+" sets that component
+    to +step, "-" sets it to -step, releasing zeroes it. The panel streams V
+    back at 100 Hz and every 7th packet is a keepalive. The server stores V
+    and a control loop polls it at TICK: any non-zero component makes the loop
+    integrate the target along V (speed proportional to that axis's step) and
+    command the arm; all-zero -> the arm holds its current pose. If keepalives
+    stop (browser closed / link dead) V goes stale after STALE_S and the loop
+    holds position. go_zero/stop park the loop so they aren't fought;
+    enable/disable are independent CAN power signals.
     """
 
-    TICK = 0.05            # control-loop period (s) -> 20 Hz
-    MAX_DPS = 45.0         # deg/s slew cap while jogging (safety)
-    SPEED_MULT = 4.0       # UI step (deg) -> jog speed: step*4 deg/s
-    STALE_S = 0.4          # intent older than this -> treat as released
+    TICK = 0.05            # control-loop poll period (s) -> 20 Hz
+    MAX_DPS = 45.0         # deg/s slew cap per joint (safety)
+    SPEED_MULT = 4.0       # |vector component| (deg) -> jog speed: |v|*4 deg/s
+    STALE_S = 0.4          # no keepalive/vector for this long -> released
     POS_TOL = 0.05         # deg; below this error we stop commanding (deadband)
 
     def __init__(self, endpoint, token="", speed=30, capture_dir=""):
@@ -98,7 +95,8 @@ class Controller(object):
         self.capture_dir = capture_dir
         self._capture_count = 0
         self._lock = threading.Lock()
-        self._intent = None          # latest {"dirs":[6],"steps":[6],"ts"} or None
+        self._vec = [0.0] * 6        # stored motion vector (signed step per axis)
+        self._ka = 0.0               # last keepalive/vector timestamp
         self._target = None          # commanded joints the loop is steering to
         self._suspend = False        # True -> loop idle (after go_zero/stop)
         self._stop = threading.Event()
@@ -119,40 +117,44 @@ class Controller(object):
             raise pc.PiperError("no joint feedback yet")
         return list(j)
 
-    # ---- intent stack (one-deep; latest wins) --------------------------
+    # ---- motion-vector intake ------------------------------------------
     def move(self, index=None, direction=None, step_deg=None, boost=1,
-             dirs=None, steps=None):
-        """Push jog intent. New form: dirs[6]+steps[6] (multi-axis, per-axis
-        net direction with same-axis +/- cancelling to 0). Legacy single-axis
-        form (index/direction/step_deg) is also accepted."""
-        if dirs is None:
-            if index is None:
-                raise pc.PiperError("move needs dirs or index")
-            dirs = [0] * 6
-            dirs[int(index)] = 1 if float(direction) >= 0 else -1
-            steps = [0] * 6
-            steps[int(index)] = abs(float(step_deg))
-        dirs = [(1.0 if float(d) > 0 else (-1.0 if float(d) < 0 else 0.0))
-                for d in list(dirs)[:6]]
-        steps = [abs(float(s)) for s in list(steps or [0] * 6)[:6]]
+             dirs=None, steps=None, vec=None):
+        """Store the browser's motion vector (signed step per axis). Accepts a
+        raw `vec[6]`, or folds the dirs[6]/steps[6] (and legacy single-axis)
+        forms into a vector. Every move packet refreshes the keepalive clock."""
+        if vec is None:
+            vec = [0.0] * 6
+            if dirs is not None:
+                d = list(dirs)[:6]
+                s = list(steps or [0] * 6)[:6]
+                for j in range(min(6, len(d))):
+                    dv = float(d[j])
+                    sv = abs(float(s[j])) if j < len(s) else 0.0
+                    vec[j] = (1.0 if dv > 0 else (-1.0 if dv < 0 else 0.0)) * sv
+            elif index is not None:
+                vec[int(index)] = (1.0 if float(direction) >= 0 else -1.0) \
+                    * abs(float(step_deg))
+        v = [float(x) for x in list(vec)[:6]]
+        v += [0.0] * (6 - len(v))
         with self._lock:
-            self._suspend = False      # a fresh jog re-engages the control loop
-            self._intent = {"dirs": dirs, "steps": steps, "ts": time.time()}
+            self._suspend = False      # fresh input re-engages the loop
+            self._vec = v
+            self._ka = time.time()
         return {"ok": True}
 
     def keepalive(self):
-        # keepalive only refreshes freshness; it never creates motion on its own
         with self._lock:
-            if self._intent is not None:
-                self._intent["ts"] = time.time()
+            self._ka = time.time()
         return {"ok": True}
 
     def hold(self):
         with self._lock:
-            self._intent = None
+            self._vec = [0.0] * 6
+            self._ka = time.time()
         return {"ok": True}
 
-    # ---- control loop: sample the stack, steer toward latest intent ----
+    # ---- control loop: poll the vector, steer along it -----------------
     def _loop(self):
         while not self._stop.is_set():
             time.sleep(self.TICK)
@@ -164,10 +166,11 @@ class Controller(object):
     def _tick(self):
         now = time.time()
         with self._lock:
-            it = dict(self._intent) if self._intent else None
+            vec = list(self._vec)
+            ka = self._ka
             suspended = self._suspend
-        if it is not None and (now - it["ts"]) > self.STALE_S:
-            it = None                                    # stale -> released
+        if now - ka > self.STALE_S:
+            vec = [0.0] * 6                            # stale -> released
 
         joints = self._read_joints()
         with self._lock:
@@ -175,20 +178,20 @@ class Controller(object):
                 self._target = list(joints)
             target = list(self._target)
 
-        if it is not None:
-            # advance each active axis at the jog speed implied by its UI step
+        if any(v != 0.0 for v in vec):
+            # non-zero components -> integrate the target along the vector
             for j in range(6):
-                d = it["dirs"][j]
-                if d == 0.0:
+                v = vec[j]
+                if v == 0.0:
                     continue
-                dps = max(1.0, min(self.MAX_DPS, (it["steps"][j] or 1.0) * self.SPEED_MULT))
-                target[j] += d * dps * self.TICK
+                dps = max(1.0, min(self.MAX_DPS, abs(v) * self.SPEED_MULT))
+                target[j] += (1.0 if v > 0 else -1.0) * dps * self.TICK
         elif suspended:
-            # go_zero / disable / stop owns the arm right now -> stay out of the way
+            # go_zero / stop owns the arm right now -> stay out of the way
             with self._lock:
                 self._target = list(joints)
             return
-        # else: intent released -> target stays put; arm converges & stops
+        # else: released -> target stays put; arm converges & stops
 
         err = max(abs(target[i] - joints[i]) for i in range(6))
         with self._lock:
@@ -216,11 +219,11 @@ class Controller(object):
         return self.client.gripper(float(position_mm))
 
     def _park_loop(self):
-        """Hand the arm to an absolute command (go_zero/disable/stop): stop the
-        control loop from steering back to a stale jog target."""
+        """Hand the arm to an absolute command (go_zero/stop): stop the control
+        loop from steering back to a stale jog target."""
         with self._lock:
             self._suspend = True
-            self._intent = None
+            self._vec = [0.0] * 6
 
     def enable(self):
         return self.client.enable()
@@ -514,7 +517,8 @@ def make_handler(ctrl, panel_html, hub=None):
             if a == "move":
                 return ctrl.move(p.get("index"), p.get("dir"), p.get("step"),
                                  p.get("boost", 1),
-                                 dirs=p.get("dirs"), steps=p.get("steps"))
+                                 dirs=p.get("dirs"), steps=p.get("steps"),
+                                 vec=p.get("vec"))
             if a == "hold":
                 return ctrl.hold()
             if a == "keepalive":

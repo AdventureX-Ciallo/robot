@@ -208,21 +208,22 @@ function _wsCmd(name,payload){            // 需要回包(命令失败弹 toast)
     if(r && r.ok===false) toast(r.error||"命令失败"); return r; });
 }
 
-// 遥控意图以固定频率推给控制器:每个轴一个"净方向"(+1/-1/0,同轴±抵消),
-// 配各自步长。控制器对非零轴按各自步长积分 => 多轴同时、同轴±=无操作。
-// 浏览器关掉/断线 -> 信令停 -> 控制器超时自动停(保活)。
-const _SIG_MS=50;
+// 浏览器维护一个 6 维运动向量 _vec:按住某轴 + 把分量设为 +步长,按 - 设为 -步长,
+// 松开归零。以 100Hz 把整个向量回传给控制器;每 7 次顺带发一次保活信令。
+// 控制器存下这个向量并轮询,有非零分量就沿向量积分执行;全零则原地保持。
+// 浏览器关掉/断线 -> 向量与保活都停 -> 控制器超时(STALE_S)自动停。
 const NJ=6;
-const _axes=Array.from({length:NJ},()=>({p:0,n:0}));
-function _axisNet(i){ return Math.sign(_axes[i].p-_axes[i].n); }
-function _anyActive(){ return _axes.some((a,i)=>_axisNet(i)!==0); }
-function _intentPayload(){
-  if(!_anyActive()) return {action:"hold"};
-  const dirs=[],steps=[];
-  for(let i=0;i<NJ;i++){ dirs.push(_axisNet(i)); steps.push(jointStep(i)); }
-  return {action:"move", dirs:dirs, steps:steps};
-}
-setInterval(()=>{ _signal(_intentPayload()); }, _SIG_MS);
+const _axes=Array.from({length:NJ},()=>({p:0,n:0}));   // 每轴按下计数(+/-)
+const _vec=new Array(NJ).fill(0);
+const _axisNet=i=>Math.sign(_axes[i].p-_axes[i].n);   // +1/-1/0(同轴±抵消)
+function _refreshVec(){ for(let i=0;i<NJ;i++) _vec[i]=_axisNet(i)*jointStep(i); }
+let _seq=0;
+setInterval(()=>{
+  _refreshVec();
+  _seq++;
+  if(_seq%7===0) _teleop({action:"keepalive"});       // 每 7 次 -> 保活
+  else _teleop({action:"move", vec:_vec});
+}, 10);   // 100 Hz
 
 // ---------- 网络 ----------
 async function api(path, payload){
@@ -239,15 +240,6 @@ function toast(msg){
 }
 // 遥控信令(teleop 通道,即发即忘;WS 不通回退 HTTP)
 function _teleop(payload){ if(!_wsSend("teleop",payload)) api("/api/"+payload.action,payload); }
-// 意图流:内容(各轴净方向或步长)一变才真正发送,避免刷屏;
-// 浏览器一关,这条流自然中断,控制器超时即停。
-let _lastSig="";
-function _signal(payload){
-  const k=payload.action+"|"+(payload.dirs?payload.dirs.join(""):"")+"|"+(payload.steps?payload.steps.join(","):"");
-  if(k===_lastSig) return;
-  _lastSig=k;
-  _teleop(payload);
-}
 
 // ---------- 回显 ----------
 function flash(el){ if(!el) return; el.classList.add("press");
@@ -262,18 +254,17 @@ function flashKey(k){
 
 // ---------- 关节点动（每轴净方向;多轴同时,同轴±抵消=无操作） ----------
 // 按下某轴 + 记 p+1,按 - 记 n+1;松开对应减。净方向=sign(p-n)。
-// 每次变化立即把整轴意图推给控制器;固定频率循环也会兜底刷新。
+// 向量由 100Hz 循环统一从净方向×步长生成并回传,这里只维护计数。
 function _update(i,d,delta){
   const a=_axes[i];
   if(d>0) a.p=Math.max(0,a.p+delta); else a.n=Math.max(0,a.n+delta);
-  _signal(_intentPayload());
 }
 function pressJoint(i,d){ _update(i,d,+1); }   // 触摸/鼠标按下
 function releaseJoint(i,d){ _update(i,d,-1); } // 触摸/鼠标松开
 function kbTap(i,d){ _update(i,d,+1); }        // 键盘按下(含首下与换轴)
 function kbRelease(i,d){ _update(i,d,-1); }    // 键盘松开
-// 全部清空(失焦等):各轴归零并发 hold
-function stopAll(){ _axes.forEach(a=>{a.p=0;a.n=0;}); _signal({action:"hold"}); }
+// 全部清空(失焦等):各轴归零;100Hz 循环下一拍即发出全零向量=停
+function stopAll(){ _axes.forEach(a=>{a.p=0;a.n=0;}); }
 
 // 键盘 -> 关节/方向(0-based 索引)
 const KEYJ={"1":{i:0,d:-1},"2":{i:0,d:+1},
