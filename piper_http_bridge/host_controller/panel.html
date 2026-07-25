@@ -177,6 +177,12 @@ let gripEditing = false;   // 用户正在拖滑条
 let _ws=null, _wsReady=false, _cid=0;
 const _pending={};
 
+// 保活:运动期间周期打点。浏览器若关闭/断线导致"松开"丢失,
+// 服务器看门狗在 ~400ms 收不到保活时自动把机械臂停下。
+const _KA_MS=150;
+setInterval(()=>{ if(_moving()) _send({action:"keepalive"}); }, _KA_MS);
+function _moving(){ return _jj.i!=null; }
+
 // ---------- 网络 ----------
 async function api(path, payload){
   try{
@@ -189,6 +195,13 @@ async function api(path, payload){
 function toast(msg){
   const t=$("#toast"); t.textContent=msg; t.style.display="block";
   clearTimeout(t._h); t._h=setTimeout(()=>t.style.display="none",2500);
+}
+function _send(payload){            // 立即下发(信令/保活用),带发送打点
+  if(_wsReady && _ws){
+    try{ _ws.send(JSON.stringify(payload)); return; }
+    catch(e){}
+  }
+  api("/api/"+payload.action, payload);
 }
 function doCmd(payload){
   // 控制走 WebSocket(低延迟,单连接);WS 未就绪时回退到 HTTP POST。
@@ -217,47 +230,35 @@ function flashKey(k){
   if(btn) flash(btn);
 }
 
-// ---------- 关节点动（点动=小步微操，按住=连续+提速） ----------
-// 判定用浏览器原生"按住即自重复",不自己计时猜:
-//   键盘按住会自动 repeat => repeat 事件即按住,直接提速;
-//   无 repeat 的单次按下   => 点动,只走一小步。
-// 鼠标/触摸没有自重复,但有真实的按下/松开事件:
-//   按下立即一小步;只有"确实按住没松开"时才在 HOLD_MS 后进入连续+提速。
-const JREP_MS=25;      // 按住时的重复率 ~40Hz -> 平滑
-const HOLD_MS=250;     // 触摸/鼠标按住超过这个时长才进入连续+提速
+// ---------- 关节点动（按下=一条 move 信令，松开=一条 hold 信令） ----------
+// 按住不再是高频灌增量,而是:按下发一条"持续运动"信令,运动期间服务器
+// 看门狗按当前速度持续给机械臂续目标;松开发一条"停"信令立即减速停。
+// 点按(很快松开)= 一下 move 紧跟 hold,自然走一小步。
 const BOOST=3;         // 按住后的步长倍率
-const _jj={i:null, d:0, base:0, timer:null};
+const _jj={i:null, d:0, step:0};
 
 function _setBoost(on){ const b=$("#boost"+_jj.i); if(b) b.classList.toggle("on",!!on); }
-function _fire(){ doCmd({action:"joint_jog", index:_jj.i, delta:_jj.d*_jj.base}); }
 
-function _timerOn(){ if(_jj.timer==null) _jj.timer=setInterval(()=>{ if(_jj.i!=null) _fire(); },JREP_MS); }
+// 按下:记录方向与步长,发一条 move 信令(速度=步长×倍率,持续运动)。
+function _moveStart(i,d,boost){
+  _jj.i=i; _jj.d=d; _jj.step=jointStep(i);
+  _setBoost(!!boost);
+  _send({action:"move", index:i, dir:d, step:_jj.step, boost:boost?BOOST:1});
+}
+// 松开/结束:清状态并发一条 hold 信令(立即减速停,且重置服务器基座)。
 function stopJoint(){
+  if(_jj.i==null) return;
   _jj.i=null;
-  if(_jj.timer!=null){ clearInterval(_jj.timer); _jj.timer=null; }
+  _send({action:"hold"});
 }
 
-// 触摸/鼠标:按下=立即一小步;松开=停。按住不放 -> HOLD_MS 后进入连续+提速。
-function pressJoint(i,d){
-  _jj.i=i; _jj.d=d; _jj.base=jointStep(i);
-  _setBoost(false);
-  _fire();
-  const tok=(_jj.tok=(_jj.tok||0)+1);
-  setTimeout(()=>{ if(_jj.tok===tok && _jj.i===i && _jj.d===d){
-    _jj.base=jointStep(i)*BOOST; _setBoost(true); _timerOn();
-  }}, HOLD_MS);
-}
-function releaseJoint(){ _jj.tok=(_jj.tok||0)+1; stopJoint(); }
+// 触摸/鼠标:按下=move(1x,系统会按住 -> 服务器续),松开=hold。
+function pressJoint(i,d){ _moveStart(i,d,false); }
+function releaseJoint(){ stopJoint(); }
 
-// 键盘:无 repeat 的单次按下=一小步;repeat(系统确认按住)=连续+提速。
-function kbTap(i,d){            // keydown 且 e.repeat=false
-  _jj.i=i; _jj.d=d; _jj.base=jointStep(i);
-  _setBoost(false); _fire();
-}
-function kbHold(i,d){           // keydown 且 e.repeat=true(系统自重复 -> 确定按住)
-  _jj.i=i; _jj.d=d; _jj.base=jointStep(i)*BOOST;
-  _setBoost(true); _fire();
-}
+// 键盘:点按=move(1x);repeat(系统确认按住)=move(BOOST 提速)。松开=hold。
+function kbTap(i,d){ _moveStart(i,d,false); }
+function kbHold(i,d){ _moveStart(i,d,true); }
 
 // 键盘 -> 关节/方向(0-based 索引)
 const KEYJ={"1":{i:0,d:-1},"2":{i:0,d:+1},

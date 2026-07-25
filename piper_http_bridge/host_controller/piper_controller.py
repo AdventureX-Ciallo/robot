@@ -62,7 +62,22 @@ import piper_client as pc  # noqa: E402
 
 
 class Controller(object):
-    """Holds endpoint client + cached state; applies jogs safely."""
+    """Velocity-driven jog controller.
+
+    The panel sends ONE 'move' signal on key/button press and ONE 'hold'
+    signal on release -- not a 40 Hz stream of position increments. While a
+    move is active a watchdog here keeps handing the arm fresh position
+    targets (base += vel*dt each tick), so motion is smooth and the arm is
+    always chasing a near-future point. On 'hold' -- or if keepalives stop
+    arriving (browser closed / link dead) -- the watchdog immediately
+    re-issues the CURRENT target (decelerate in place) and re-syncs the base
+    to real feedback, so the arm stops right away instead of draining a
+    backlog of queued targets (the overshoot).
+    """
+
+    TICK = 0.04            # watchdog period (s) -> 25 Hz target refresh
+    KA_TIMEOUT = 0.45      # no keepalive for this long -> auto-hold
+    VEL_CAP = 45.0         # deg/s safety cap on jog velocity
 
     def __init__(self, endpoint, token="", speed=30, capture_dir=""):
         self.ep = endpoint.rstrip("/")
@@ -77,8 +92,13 @@ class Controller(object):
         self.speed = speed
         self.capture_dir = capture_dir
         self._capture_count = 0
-        self._last_joints = None     # last commanded joints (base for jog deltas)
+        self._last_joints = None     # commanded joints (jog base; synced to feedback)
         self._lock = threading.Lock()
+        self._vel = [0.0] * 6        # deg/s per joint while a move is active
+        self._ka = 0.0               # last keepalive (or move) timestamp
+        self._stop = threading.Event()
+        self._wd = threading.Thread(target=self._watchdog, daemon=True)
+        self._wd.start()
 
     # ---- state ---------------------------------------------------------
     def state(self):
@@ -86,10 +106,73 @@ class Controller(object):
             st = self.client.state()
             # Correct the jog base from real feedback so drift doesn't accumulate.
             if isinstance(st, dict) and st.get("joints_deg"):
-                self._last_joints = list(st["joints_deg"])
+                with self._lock:
+                    self._last_joints = list(st["joints_deg"])
             return {"ok": True, "state": st}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    # ---- move / hold signaling ----------------------------------------
+    def move(self, index, direction, step_deg, boost=1):
+        """Press signal: start jogging `index` in `direction` at step*boost deg/s."""
+        index = int(index)
+        if not 0 <= index <= 5:
+            raise pc.PiperError("joint index must be 0..5")
+        vel = max(-self.VEL_CAP, min(self.VEL_CAP,
+                  float(direction) * abs(float(step_deg)) * float(boost or 1)))
+        with self._lock:
+            self._vel = [0.0] * 6
+            self._vel[index] = vel
+            self._ka = time.time()       # a move also counts as a keepalive
+        return {"ok": True, "index": index, "vel": vel}
+
+    def keepalive(self):
+        with self._lock:
+            self._ka = time.time()
+        return {"ok": True}
+
+    def hold(self):
+        """Release signal: stop jogging now and re-sync to real feedback."""
+        with self._lock:
+            self._vel = [0.0] * 6
+            self._ka = time.time()
+        self._sync_base()
+        return {"ok": True}
+
+    def _sync_base(self):
+        try:
+            st = self.client.state()
+            if isinstance(st, dict) and st.get("joints_deg"):
+                with self._lock:
+                    self._last_joints = list(st["joints_deg"])
+        except Exception:
+            pass
+
+    # ---- watchdog: stream targets while moving, stop on keepalive loss --
+    def _watchdog(self):
+        while not self._stop.is_set():
+            time.sleep(self.TICK)
+            with self._lock:
+                vel = list(self._vel)
+                base = list(self._last_joints) if self._last_joints else None
+                ka = self._ka
+            moving = any(v != 0.0 for v in vel)
+            if not moving:
+                continue
+            # keepalive lost (browser closed / link dead) -> stop the arm
+            if time.time() - ka > self.KA_TIMEOUT:
+                self.hold()
+                continue
+            if base is None:
+                self._sync_base()
+                continue
+            target = [base[i] + vel[i] * self.TICK for i in range(6)]
+            try:
+                self.client.joint_ctrl(target, speed=self.speed)
+                with self._lock:
+                    self._last_joints = target
+            except Exception:
+                pass
 
     # ---- joint jog -----------------------------------------------------
     def joint_jog(self, index, delta_deg):
@@ -98,11 +181,6 @@ class Controller(object):
             raise pc.PiperError("joint index must be 0..5")
         delta = float(delta_deg)
         with self._lock:
-            # Use the last commanded joints as the base when available. A jog
-            # applies a *relative* delta, so chaining from our own last command
-            # avoids an extra HTTP /state round-trip per tick (which would make
-            # hold-to-jog lag behind the fast repeat rate on weak links). The
-            # cache is corrected by feedback on the next state poll.
             base = self._last_joints
             if base is None:
                 st = self.client.state()
@@ -405,6 +483,13 @@ def make_handler(ctrl, panel_html, hub=None):
             a = p.get("action")
             if a == "joint_jog":
                 return ctrl.joint_jog(p.get("index", 0), p.get("delta", 0))
+            if a == "move":
+                return ctrl.move(p.get("index", 0), p.get("dir", 0),
+                                 p.get("step", 3), p.get("boost", 1))
+            if a == "hold":
+                return ctrl.hold()
+            if a == "keepalive":
+                return ctrl.keepalive()
             if a == "gripper":
                 return {"ok": True, "r": ctrl.gripper(p.get("position_mm", 0))}
             if a == "enable":
