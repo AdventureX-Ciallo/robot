@@ -213,21 +213,21 @@ function _wsCmd(name,payload){            // 需要回包(命令失败弹 toast)
 }
 
 // 浏览器维护一个 6 维运动向量 _vec:按住某轴 + 把分量设为 +步长,按 - 设为 -步长,
-// 松开归零。以 100Hz 把整个向量回传给控制器;每 7 次顺带发一次保活信令。
-// 控制器存下这个向量并轮询,有非零分量就沿向量积分执行;全零则原地保持。
+// 松开归零。以 25Hz 把向量用紧凑数组回传(走 teleop WS,即发即忘);
+// 每 2s 再发一次保活。控制器存下向量并 20Hz 轮询,有非零分量就沿向量积分执行。
 // 浏览器关掉/断线 -> 向量与保活都停 -> 控制器超时(STALE_S)自动停。
 const NJ=6;
 const _axes=Array.from({length:NJ},()=>({p:0,n:0}));   // 每轴按下计数(+/-)
 const _vec=new Array(NJ).fill(0);
 const _axisNet=i=>Math.sign(_axes[i].p-_axes[i].n);   // +1/-1/0(同轴±抵消)
 function _refreshVec(){ for(let i=0;i<NJ;i++) _vec[i]=_axisNet(i)*jointStep(i); }
-let _seq=0;
+let _lastKa=0;
 setInterval(()=>{
   _refreshVec();
-  _seq++;
-  if(_seq%7===0) _teleop({action:"keepalive", _id:1});       // 每 7 次 -> 保活
-  else _teleop({action:"move", vec:_vec, _id:1});
-}, 10);   // 100 Hz
+  const now=Date.now();
+  if(now-_lastKa>=2000){ _lastKa=now; _wsSend("teleop",["k"]); }   // 保活
+  else _wsSend("teleop",["v",..._vec]);                            // 紧凑向量
+}, 40);   // 25 Hz
 
 // ---------- 网络 ----------
 async function api(path, payload){
@@ -242,8 +242,7 @@ function toast(msg){
   const t=$("#toast"); t.textContent=msg; t.style.display="block";
   clearTimeout(t._h); t._h=setTimeout(()=>t.style.display="none",2500);
 }
-// 遥控信令(teleop 通道;WS 带回包以便报错,WS 不通回退 HTTP,错误弹 toast)
-function _teleop(payload){ _wsCmd("teleop",payload); }
+// 高频信令直接走 _wsSend("teleop", 紧凑数组);一次性命令走 _wsCmd(带回包)。
 
 // ---------- 回显 ----------
 function flash(el){ if(!el) return; el.classList.add("press");

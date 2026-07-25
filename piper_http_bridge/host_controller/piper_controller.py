@@ -186,6 +186,18 @@ class Controller(object):
             self._c_move += 1
         return {"ok": True}
 
+    def set_vec(self, vec):
+        """Compact signal path: store the 6-vector and refresh the keepalive
+        clock. Any packet on the signal stream counts as a keepalive."""
+        v = [float(x) for x in list(vec)[:6]]
+        v += [0.0] * (6 - len(v))
+        with self._lock:
+            self._suspend = False
+            self._vec = v
+            self._ka = time.time()
+            self._c_move += 1
+        return {"ok": True}
+
     def keepalive(self):
         with self._lock:
             self._ka = time.time()
@@ -555,6 +567,16 @@ def make_handler(ctrl, panel_html, hub=None):
                     break
                 try:
                     p = json.loads(payload)
+                    # Compact signal packets (arrays) take the fast path with no
+                    # reply; dicts go through dispatch and may get an _id reply.
+                    if isinstance(p, list):
+                        if p and p[0] == "v":
+                            ctrl.set_vec(p[1:])
+                        elif p and p[0] == "k":
+                            ctrl.keepalive()
+                        elif p and p[0] == "h":
+                            ctrl.hold()
+                        continue
                     out = self._dispatch(p)
                     if isinstance(p, dict) and "_id" in p:
                         out = dict(out) if isinstance(out, dict) \
