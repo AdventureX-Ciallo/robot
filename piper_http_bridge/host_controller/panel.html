@@ -70,8 +70,6 @@
        border:1px solid var(--line);border-radius:8px;padding:7px 8px;font-size:14px;
        font-family:ui-monospace,monospace;text-align:right}
   .joint input[type=number],#gripStep{width:56px;padding:6px 4px;font-size:12px}
-  .boost{color:var(--warn);font-size:11px;font-weight:600;visibility:hidden;margin-left:6px}
-  .boost.on{visibility:visible}
   .flash{outline:2px solid var(--acc);outline-offset:1px}
 </style>
 </head>
@@ -91,7 +89,7 @@
     <div class="card">
       <h2>关节点动（按轴 · 右侧为各轴步长°）</h2>
       <div id="joints"></div>
-      <div class="muted" style="text-align:center">按住 = 大步长（快速） · 点动 = 小步长（微操）</div>
+      <div class="muted" style="text-align:center">步长越大点动越快 · 按住连续动,松开即停</div>
     </div>
     <div class="card">
       <h2>按键说明</h2>
@@ -173,20 +171,58 @@ let gripTarget = 0;        // 本地维护的目标值(命令)
 let gripActual = 0;        // 机械臂反馈的实际值(用于渲染滑条)
 let gripEditing = false;   // 用户正在拖滑条
 
-// ---- WebSocket 控制通道(命令走 ws;断开时回退 HTTP) ----
-let _ws=null, _wsReady=false, _cid=0;
-const _pending={};
+// ---- 三条 WebSocket 通道:实时数据 / 遥控 / 夹爪(断开各自回退 HTTP) ----
+//   /ws/state   服务器 ~10Hz 推状态(只收)
+//   /ws/teleop  遥控信令:点动 move/hold/keepalive + 使能/失能/回零/急停
+//   /ws/gripper 夹爪位置命令
+const _chan={};        // name -> {ws, ready, cid, pend:{}, t}
+function _conn(name, onMsg){
+  const c=_chan[name] || (_chan[name]={ws:null,ready:false,cid:0,pend:{},t:null});
+  let ws;
+  try{ ws=new WebSocket((location.protocol==="https:"?"wss://":"ws://")+location.host+"/ws/"+name); }
+  catch(e){ c.ready=false; schedule(); return; }
+  c.ws=ws;
+  ws.onopen=()=>{ c.ready=true; };
+  ws.onmessage=ev=>{ let m; try{ m=JSON.parse(ev.data); }catch(_){ return; }
+    if(m && typeof m._id==="number"){ const r=c.pend[m._id]; delete c.pend[m._id];
+      if(r) r(m); return; }
+    if(onMsg) onMsg(m); };
+  const down=()=>{ c.ready=false; c.ws=null; schedule(); };
+  ws.onclose=down; ws.onerror=()=>{ try{ws.close();}catch(_){ } };
+  function schedule(){ clearTimeout(c.t); c.t=setTimeout(()=>_conn(name,onMsg),1500); }
+}
+function _wsSend(name,payload){           // 即发即忘(无回包)
+  const c=_chan[name];
+  if(c && c.ready && c.ws){ try{ c.ws.send(JSON.stringify(payload)); return true; }catch(e){} }
+  return false;
+}
+function _wsCmd(name,payload){            // 需要回包(命令失败弹 toast)
+  const c=_chan[name];
+  if(c && c.ready && c.ws){
+    return new Promise(resolve=>{ const id=++c.cid; payload._id=id; c.pend[id]=resolve;
+      try{ c.ws.send(JSON.stringify(payload)); }
+      catch(e){ delete c.pend[id]; resolve({ok:false,error:String(e)}); }
+    }).then(r=>{ if(r && r.ok===false) toast(r.error||"命令失败"); return r; });
+  }
+  return api("/api/"+payload.action, payload).then(r=>{
+    if(r && r.ok===false) toast(r.error||"命令失败"); return r; });
+}
 
-// 意图以固定频率推给控制器:按住的轴+方向+步长,未按则为"停"。
-// 控制器把最新意图压栈,控制环按自己的节拍取样执行 => 平滑;
+// 遥控意图以固定频率推给控制器:每个轴一个"净方向"(+1/-1/0,同轴±抵消),
+// 配各自步长。控制器对非零轴按各自步长积分 => 多轴同时、同轴±=无操作。
 // 浏览器关掉/断线 -> 信令停 -> 控制器超时自动停(保活)。
 const _SIG_MS=50;
-setInterval(()=>{
-  const m = (_jj.i!=null)
-    ? {action:"move", index:_jj.i, dir:_jj.d, step:_jj.step, boost:1}
-    : {action:"hold"};
-  _signal(m);
-}, _SIG_MS);
+const NJ=6;
+const _axes=Array.from({length:NJ},()=>({p:0,n:0}));
+function _axisNet(i){ return Math.sign(_axes[i].p-_axes[i].n); }
+function _anyActive(){ return _axes.some((a,i)=>_axisNet(i)!==0); }
+function _intentPayload(){
+  if(!_anyActive()) return {action:"hold"};
+  const dirs=[],steps=[];
+  for(let i=0;i<NJ;i++){ dirs.push(_axisNet(i)); steps.push(jointStep(i)); }
+  return {action:"move", dirs:dirs, steps:steps};
+}
+setInterval(()=>{ _signal(_intentPayload()); }, _SIG_MS);
 
 // ---------- 网络 ----------
 async function api(path, payload){
@@ -201,36 +237,16 @@ function toast(msg){
   const t=$("#toast"); t.textContent=msg; t.style.display="block";
   clearTimeout(t._h); t._h=setTimeout(()=>t.style.display="none",2500);
 }
-function _send(payload){            // 立即下发(一次性命令:使能/夹爪/拍照等)
-  if(_wsReady && _ws){
-    try{ _ws.send(JSON.stringify(payload)); return; }
-    catch(e){}
-  }
-  api("/api/"+payload.action, payload);
-}
-// 意图流:只在内容变化时才真正发送,避免对相同状态刷屏;
+// 遥控信令(teleop 通道,即发即忘;WS 不通回退 HTTP)
+function _teleop(payload){ if(!_wsSend("teleop",payload)) api("/api/"+payload.action,payload); }
+// 意图流:内容(各轴净方向或步长)一变才真正发送,避免刷屏;
 // 浏览器一关,这条流自然中断,控制器超时即停。
 let _lastSig="";
 function _signal(payload){
-  const k=payload.action+"|"+(payload.index??"")+"|"+(payload.dir??"")+"|"+(payload.step??"");
+  const k=payload.action+"|"+(payload.dirs?payload.dirs.join(""):"")+"|"+(payload.steps?payload.steps.join(","):"");
   if(k===_lastSig) return;
   _lastSig=k;
-  _send(payload);
-}
-function doCmd(payload){
-  // 控制走 WebSocket(低延迟,单连接);WS 未就绪时回退到 HTTP POST。
-  if(_wsReady && _ws){
-    return new Promise(resolve=>{
-      const id=++_cid; payload._id=id;
-      _pending[id]=resolve;
-      try{ _ws.send(JSON.stringify(payload)); }
-      catch(e){ delete _pending[id]; resolve({ok:false,error:String(e)}); }
-    }).then(r=>{ if(r && r.ok===false) toast(r.error||"命令失败"); return r; });
-  }
-  return api("/api/"+payload.action, payload).then(r=>{
-    if(r && r.ok===false) toast(r.error||"命令失败");
-    return r;
-  });
+  _teleop(payload);
 }
 
 // ---------- 回显 ----------
@@ -244,35 +260,20 @@ function flashKey(k){
   if(btn) flash(btn);
 }
 
-// ---------- 关节点动（按下=一条 move 信令，松开=一条 hold 信令） ----------
-// 按下发一条 move,运动期间服务器看门狗以固定增量、匀速沿该方向持续
-// "爬行"(从当前位置加同一增量),不会追不断前移的目标而摆动;
-// 松开发一条 hold,服务器把当前位置原样回发,手臂就地减速停(不泄压)。
-// 点按(很快松开)= 一下 move 紧跟 hold,走一小步。低速档 => 平滑不摆。
-const _jj={i:null, d:0, step:0};
-
-function _setBoost(on){ const b=$("#boost"+_jj.i); if(b) b.classList.toggle("on",!!on); }
-
-// 按下:记录方向与步长,发一条 move 信令(服务器据此持续爬行)。
-function _moveStart(i,d){
-  _jj.i=i; _jj.d=d; _jj.step=jointStep(i);
-  _setBoost(false);
-  _send({action:"move", index:i, dir:d, step:_jj.step, boost:1});
+// ---------- 关节点动（每轴净方向;多轴同时,同轴±抵消=无操作） ----------
+// 按下某轴 + 记 p+1,按 - 记 n+1;松开对应减。净方向=sign(p-n)。
+// 每次变化立即把整轴意图推给控制器;固定频率循环也会兜底刷新。
+function _update(i,d,delta){
+  const a=_axes[i];
+  if(d>0) a.p=Math.max(0,a.p+delta); else a.n=Math.max(0,a.n+delta);
+  _signal(_intentPayload());
 }
-// 松开/结束:清状态并发一条 hold 信令(就地停住)。
-function stopJoint(){
-  if(_jj.i==null) return;
-  _jj.i=null;
-  _send({action:"hold"});
-}
-
-// 触摸/鼠标:按下=move,松开=hold。
-function pressJoint(i,d){ _moveStart(i,d); }
-function releaseJoint(){ stopJoint(); }
-
-// 键盘:点按/按住 repeat 都发 move;松开=hold。
-function kbTap(i,d){ _moveStart(i,d); }
-function kbHold(i,d){ _moveStart(i,d); }
+function pressJoint(i,d){ _update(i,d,+1); }   // 触摸/鼠标按下
+function releaseJoint(i,d){ _update(i,d,-1); } // 触摸/鼠标松开
+function kbTap(i,d){ _update(i,d,+1); }        // 键盘按下(含首下与换轴)
+function kbRelease(i,d){ _update(i,d,-1); }    // 键盘松开
+// 全部清空(失焦等):各轴归零并发 hold
+function stopAll(){ _axes.forEach(a=>{a.p=0;a.n=0;}); _signal({action:"hold"}); }
 
 // 键盘 -> 关节/方向(0-based 索引)
 const KEYJ={"1":{i:0,d:-1},"2":{i:0,d:+1},
@@ -282,7 +283,7 @@ const KEYJ={"1":{i:0,d:-1},"2":{i:0,d:+1},
             "9":{i:4,d:-1},"0":{i:4,d:+1},
             "-":{i:5,d:-1},"=":{i:5,d:+1}};
 
-// 键盘:点按=一小步;按住(系统自动 repeat)=连续+提速。松开停。不含 Space/Enter。
+// 键盘:多键各自独立;按下记该轴该向,松开减该轴该向。同轴±同时在按=净0=无操作。
 const _keyHeld={};
 document.addEventListener("keydown",e=>{
   const k=e.key.toLowerCase();
@@ -290,25 +291,21 @@ document.addEventListener("keydown",e=>{
   if(k==="g"||k==="h"){ if(e.repeat) return;
     gripTo(gripActual+(k==="h"?1:-1)*gripStep()); flashKey(k); return; }
   const spec=KEYJ[k];
-  if(!spec) return;
-  if(e.repeat){ if(_keyHeld[k]) kbHold(spec.i,spec.d); }   // 系统确认按住 -> 提速
-  else { flashKey(k); _keyHeld[k]=true; kbTap(spec.i,spec.d); }
+  if(!spec || e.repeat) return;               // 循环信令负责持续,repeat 不重复记
+  flashKey(k); _keyHeld[k]=true; kbTap(spec.i,spec.d);
 });
 document.addEventListener("keyup",e=>{
   const k=e.key.toLowerCase();
-  if(KEYJ[k]){ delete _keyHeld[k];
-    const still=Object.keys(_keyHeld).filter(x=>KEYJ[x]);
-    if(still.length){ const s=KEYJ[still[still.length-1]]; kbTap(s.i,s.d); }
-    else stopJoint();
-  }
+  const spec=KEYJ[k];
+  if(spec){ if(_keyHeld[k]){ delete _keyHeld[k]; kbRelease(spec.i,spec.d); } }
 });
-window.addEventListener("blur",()=>{ for(const k in _keyHeld) delete _keyHeld[k]; stopJoint(); });
+window.addEventListener("blur",()=>{ for(const k in _keyHeld) delete _keyHeld[k]; stopAll(); });
 
 // ---------- 夹爪 ----------
 function gripTo(mm){
   // 目标值基于实际反馈推算,避免连续按键期间目标漂移/回跳
   gripTarget=Math.max(0,Math.min(80,mm));
-  doCmd({action:"gripper", position_mm:gripTarget});
+  _wsCmd("gripper",{action:"gripper", position_mm:gripTarget});
 }
 function gripHandler(btn,dir){
   let t=null;
@@ -326,11 +323,11 @@ gripHandler($("#gClose"),-1);
 $("#grip").addEventListener("input",e=>{ gripEditing=true; gripTo(Number(e.target.value)); });
 $("#grip").addEventListener("change",()=>{ gripEditing=false; });
 
-// ---------- 模式 ----------
-$("#btnEnable").onclick =()=>{flash($("#btnEnable")); doCmd({action:"enable"});};
-$("#btnDisable").onclick=()=>{flash($("#btnDisable")); doCmd({action:"disable"});};
-$("#btnStop").onclick   =()=>{flash($("#btnStop")); doCmd({action:"stop"});};
-$("#btnZero").onclick   =()=>{flash($("#btnZero")); doCmd({action:"go_zero"});};
+// ---------- 模式(走 teleop 通道) ----------
+$("#btnEnable").onclick =()=>{flash($("#btnEnable")); _wsCmd("teleop",{action:"enable"});};
+$("#btnDisable").onclick=()=>{flash($("#btnDisable")); _wsCmd("teleop",{action:"disable"});};
+$("#btnStop").onclick   =()=>{flash($("#btnStop")); _wsCmd("teleop",{action:"stop"});};
+$("#btnZero").onclick   =()=>{flash($("#btnZero")); _wsCmd("teleop",{action:"go_zero"});};
 
 // ---------- 关节点动 ----------
 const JOINT_NAMES=["J1","J2","J3","J4","J5","J6"];
@@ -343,13 +340,12 @@ const JOINT_KEY=[["1","2"],["3","4"],["5","6"],["7","8"],["9","0"],["-","="]];
       <button data-joint="${i}:-1"><span class="kbd">${JOINT_KEY[i][0]}</span> −</button>
       <span class="val" id="jv${i}">—</span>
       <button data-joint="${i}:+1"><span class="kbd">${JOINT_KEY[i][1]}</span> +</button>
-      <input type="number" id="js${i}" min="0.1" max="90" step="0.1" value="3" title="步长(°)">
-      <span class="boost" id="boost${i}">加速</span>`;
+      <input type="number" id="js${i}" min="0.1" max="90" step="0.1" value="3" title="步长(°)">`;
     box.appendChild(row);
     row.querySelectorAll("button").forEach(b=>{
       const d=Number(b.dataset.joint.split(":")[1]);
       const start=e=>{e.preventDefault(); flash(b); pressJoint(i,d);};
-      const stop=()=>releaseJoint();
+      const stop=()=>releaseJoint(i,d);
       b.addEventListener("mousedown",start); b.addEventListener("touchstart",start,{passive:false});
       b.addEventListener("mouseup",stop); b.addEventListener("mouseleave",stop);
       b.addEventListener("touchend",stop);
@@ -458,7 +454,7 @@ const JOINT_KEY=[["1","2"],["3","4"],["5","6"],["7","8"],["9","0"],["-","="]];
     ctx.drawImage(vid, 0, 0, canvas.width, canvas.height);
     const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
     captureBtn.disabled = true;
-    const r = await api("/api/capture_frame", {
+    const r = await _wsCmd("teleop", {
       action: "capture_frame",
       data_url: dataUrl,
       prefix: "mahjong"
@@ -554,28 +550,11 @@ let pollTimer=null;
 function startPolling(){ if(!pollTimer) pollTimer=setInterval(pollOnce,800); }
 function stopPolling(){ if(pollTimer){ clearInterval(pollTimer); pollTimer=null; } }
 
-function connectWS(){
-  let ws;
-  try{ ws=new WebSocket((location.protocol==="https:"?"wss://":"ws://")+location.host+"/ws"); }
-  catch(e){ startPolling(); return; }
-  _ws=ws;
-  ws.onopen=()=>{ _wsReady=true; stopPolling(); };
-  ws.onmessage=ev=>{
-    let m; try{ m=JSON.parse(ev.data); }catch(_){ return; }
-    if(m && typeof m._id==="number"){          // 命令回包
-      const res=_pending[m._id]; delete _pending[m._id];
-      if(res) res(m);
-      return;
-    }
-    _gotState=true; render(m);                 // 状态推送
-  };
-  ws.onclose=()=>{ _wsReady=false; _ws=null;
-                   $("#conn").textContent="未连接"; $("#conn").className="pill off";
-                   startPolling(); setTimeout(connectWS,1500); };
-  ws.onerror=()=>{ try{ws.close();}catch(_){} };
-}
-connectWS();
-startPolling();   // WS 接通前先用轮询,接通后自动停止
+// 三条通道:实时数据(收到即渲染并停轮询) + 遥控 + 夹爪
+_conn("state", m=>{ _gotState=true; render(m); stopPolling(); });
+_conn("teleop");
+_conn("gripper");
+startPolling();   // state 通道接通前先用轮询,接通后自动停止
 </script>
 </body>
 </html>

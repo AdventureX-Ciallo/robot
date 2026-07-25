@@ -79,7 +79,8 @@ class Controller(object):
     """
 
     TICK = 0.05            # control-loop period (s) -> 20 Hz
-    MAX_DPS = 30.0         # deg/s slew cap while jogging (smooth band)
+    MAX_DPS = 45.0         # deg/s slew cap while jogging (safety)
+    SPEED_MULT = 4.0       # UI step (deg) -> jog speed: step*4 deg/s
     STALE_S = 0.4          # intent older than this -> treat as released
     POS_TOL = 0.05         # deg; below this error we stop commanding (deadband)
 
@@ -97,8 +98,9 @@ class Controller(object):
         self.capture_dir = capture_dir
         self._capture_count = 0
         self._lock = threading.Lock()
-        self._intent = None          # latest {"index","dir","step","ts"} or None
+        self._intent = None          # latest {"dirs":[6],"steps":[6],"ts"} or None
         self._target = None          # commanded joints the loop is steering to
+        self._suspend = False        # True -> loop idle (after go_zero/stop)
         self._stop = threading.Event()
         self._wd = threading.Thread(target=self._loop, daemon=True)
         self._wd.start()
@@ -118,14 +120,24 @@ class Controller(object):
         return list(j)
 
     # ---- intent stack (one-deep; latest wins) --------------------------
-    def move(self, index, direction, step_deg, boost=1):
-        index = int(index)
-        if not 0 <= index <= 5:
-            raise pc.PiperError("joint index must be 0..5")
+    def move(self, index=None, direction=None, step_deg=None, boost=1,
+             dirs=None, steps=None):
+        """Push jog intent. New form: dirs[6]+steps[6] (multi-axis, per-axis
+        net direction with same-axis +/- cancelling to 0). Legacy single-axis
+        form (index/direction/step_deg) is also accepted."""
+        if dirs is None:
+            if index is None:
+                raise pc.PiperError("move needs dirs or index")
+            dirs = [0] * 6
+            dirs[int(index)] = 1 if float(direction) >= 0 else -1
+            steps = [0] * 6
+            steps[int(index)] = abs(float(step_deg))
+        dirs = [(1.0 if float(d) > 0 else (-1.0 if float(d) < 0 else 0.0))
+                for d in list(dirs)[:6]]
+        steps = [abs(float(s)) for s in list(steps or [0] * 6)[:6]]
         with self._lock:
-            self._intent = {"index": index, "dir": 1.0 if float(direction) >= 0 else -1.0,
-                            "step": abs(float(step_deg)) * float(boost or 1),
-                            "ts": time.time()}
+            self._suspend = False      # a fresh jog re-engages the control loop
+            self._intent = {"dirs": dirs, "steps": steps, "ts": time.time()}
         return {"ok": True}
 
     def keepalive(self):
@@ -153,6 +165,7 @@ class Controller(object):
         now = time.time()
         with self._lock:
             it = dict(self._intent) if self._intent else None
+            suspended = self._suspend
         if it is not None and (now - it["ts"]) > self.STALE_S:
             it = None                                    # stale -> released
 
@@ -163,9 +176,18 @@ class Controller(object):
             target = list(self._target)
 
         if it is not None:
-            # advance the goal at a velocity proportional to the requested step
-            dps = max(1.0, min(self.MAX_DPS, it["step"] * 10.0))
-            target[it["index"]] += it["dir"] * dps * self.TICK
+            # advance each active axis at the jog speed implied by its UI step
+            for j in range(6):
+                d = it["dirs"][j]
+                if d == 0.0:
+                    continue
+                dps = max(1.0, min(self.MAX_DPS, (it["steps"][j] or 1.0) * self.SPEED_MULT))
+                target[j] += d * dps * self.TICK
+        elif suspended:
+            # go_zero / disable / stop owns the arm right now -> stay out of the way
+            with self._lock:
+                self._target = list(joints)
+            return
         # else: intent released -> target stays put; arm converges & stops
 
         err = max(abs(target[i] - joints[i]) for i in range(6))
@@ -185,6 +207,7 @@ class Controller(object):
         joints[index] = joints[index] + delta
         self.client.joint_ctrl(joints, speed=self.speed)
         with self._lock:
+            self._suspend = False
             self._target = list(joints)
         return {"ok": True, "joints_deg": joints}
 
@@ -192,16 +215,28 @@ class Controller(object):
     def gripper(self, position_mm):
         return self.client.gripper(float(position_mm))
 
+    def _park_loop(self):
+        """Hand the arm to an absolute command (go_zero/disable/stop): stop the
+        control loop from steering back to a stale jog target."""
+        with self._lock:
+            self._suspend = True
+            self._intent = None
+
     def enable(self):
         return self.client.enable()
 
     def disable(self):
+        # enable/disable are independent CAN power signals (motor torque on/off),
+        # not pose jumps -- the control loop can stay engaged; it just has no effect
+        # while the drivers are unpowered.
         return self.client.disable()
 
     def stop(self):
+        self._park_loop()
         return self.client.stop()
 
     def go_zero(self):
+        self._park_loop()
         return self.client.go_zero()
 
     def save_capture(self, data_url, prefix="mahjong"):
@@ -408,7 +443,7 @@ def make_handler(ctrl, panel_html, hub=None):
             self._send(code, "text/plain; charset=us-ascii", body)
 
         def do_GET(self):
-            if self.path == "/ws":
+            if self.path in ("/ws/state", "/ws/teleop", "/ws/gripper"):
                 return self._ws_handshake()
             if self.path in ("/", "/index.html"):
                 return self._html(200, panel_html)
@@ -433,11 +468,9 @@ def make_handler(ctrl, panel_html, hub=None):
             except (UnicodeEncodeError, BrokenPipeError, ConnectionResetError):
                 return
             client = WSClient(self.rfile, self.wfile)
-            hub.add(client)
-            # Read this client's incoming frames: control commands run over the
-            # same socket (replies carry the request's "_id"); state keeps being
-            # pushed by the hub. Park here until the client disconnects so the
-            # HTTP server does not tear down the (now upgraded) socket.
+            # /ws/state only ever pushes state; the two command channels read.
+            if self.path == "/ws/state":
+                hub.add(client)
             while client.alive:
                 payload = _ws_read_text_frame(self.rfile)
                 if payload is None:
@@ -479,8 +512,9 @@ def make_handler(ctrl, panel_html, hub=None):
             if a == "joint_jog":
                 return ctrl.joint_jog(p.get("index", 0), p.get("delta", 0))
             if a == "move":
-                return ctrl.move(p.get("index", 0), p.get("dir", 0),
-                                 p.get("step", 3), p.get("boost", 1))
+                return ctrl.move(p.get("index"), p.get("dir"), p.get("step"),
+                                 p.get("boost", 1),
+                                 dirs=p.get("dirs"), steps=p.get("steps"))
             if a == "hold":
                 return ctrl.hold()
             if a == "keepalive":
